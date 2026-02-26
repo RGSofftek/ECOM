@@ -1,0 +1,437 @@
+############################################## SAP BOT (BATCH + RESUMABLE) ###############################################
+## Goal:
+## - Take contracts from Excel "Template"
+## - Create Deal Contracts in SAP (ZWB21) with header data, characteristics, texts, and price/rules
+## - Log each processed Template row into "Processed" so the bot can resume safely
+########################################################################################################################
+
+#%region INPUTS & SETUP ──────────────────────────────────────────────────────
+## Expected GLOBAL variables (set in FRIDA Variables UI):
+## <<excelFile>>  -> full path to the Excel file
+## <<sapUser>>    -> SAP username
+## <<sapPass>>    -> SAP password
+
+GetHome as "home"
+GetCurrentDate format={"yyyy-MM-dd_HH-mm-ss" en} and save as RunStamp
+DefineVariable as "runId" with the value "SAPBot_<<<RunStamp>>>"
+
+## Evidence folder (optional, for quick debugging / audit)
+DefineVariable as "evidenceDir" with the value "<<<home>>>Documents\Frida_SAP_Evidence"
+try
+	File CheckIfDirExist in the path "<<<home>>>Documents" with the name "Frida_SAP_Evidence"
+catch
+	File NewFolder in "<<<home>>>Documents" with the name "Frida_SAP_Evidence"
+end
+#%endregion
+
+
+#%region LOAD EXCEL & VALIDATE TEMPLATE HEADERS ──────────────────────────────
+DefineVariable as "excelFile" with the value "C:\Users\rodrigo.gracia\Documents\Projects\ECOM\Inputs\ECOM_MASIVO 9 FEBRERO 2026.xlsx"
+Excel LoadWBook "<<<excelFile>>>" as WBName
+##Excel LoadWBook "<<excelFile>>" as WBName
+Excel LoadWSheet WBName sheet "Template" as WSName
+Excel LoadWSheet WBName sheet "Processed" as WSProcessed
+
+## This validation enforces that Template structure matches what the bot expects.
+## If you change the template (add/reorder/rename columns), update ExpectedHeaders here.
+
+DefineVariable type "List" as "ExpectedHeaders"
+AddValueToList "ExpectedHeaders" value "ContractType"
+AddValueToList "ExpectedHeaders" value "Org. Data"
+AddValueToList "ExpectedHeaders" value "Purchasing Group"
+AddValueToList "ExpectedHeaders" value "Price Type"
+AddValueToList "ExpectedHeaders" value "Contract Date"
+AddValueToList "ExpectedHeaders" value "Plant"
+AddValueToList "ExpectedHeaders" value "Material"
+AddValueToList "ExpectedHeaders" value "Quantity"
+AddValueToList "ExpectedHeaders" value "Delivery Period From"
+AddValueToList "ExpectedHeaders" value "Delivery Period To"
+AddValueToList "ExpectedHeaders" value "BP"
+AddValueToList "ExpectedHeaders" value "Payment Terms"
+AddValueToList "ExpectedHeaders" value "Incoterms"
+AddValueToList "ExpectedHeaders" value "Currency"
+AddValueToList "ExpectedHeaders" value "Origin"
+AddValueToList "ExpectedHeaders" value "Destination"
+AddValueToList "ExpectedHeaders" value "Characteristics Certifications"
+AddValueToList "ExpectedHeaders" value "Characteristics Crop Year"
+AddValueToList "ExpectedHeaders" value "Characteristics Yield Factor"
+AddValueToList "ExpectedHeaders" value "Characteristics Process"
+AddValueToList "ExpectedHeaders" value "Characteristics Region"
+AddValueToList "ExpectedHeaders" value "Characteristics Bag Capacity"
+AddValueToList "ExpectedHeaders" value "Characteristics Faults"
+AddValueToList "ExpectedHeaders" value "Characteristics Screen and preparation"
+AddValueToList "ExpectedHeaders" value "Characteristics Costumer Profile"
+AddValueToList "ExpectedHeaders" value "Characteristics Type Coffee"
+AddValueToList "ExpectedHeaders" value "Text – General Remarks"
+AddValueToList "ExpectedHeaders" value "Text – Producer FLO ID"
+AddValueToList "ExpectedHeaders" value "Text – Price"
+AddValueToList "ExpectedHeaders" value "Text – Additional Condition"
+AddValueToList "ExpectedHeaders" value "Precio"
+AddValueToList "ExpectedHeaders" value "Market Price"
+AddValueToList "ExpectedHeaders" value "Cover Month"
+AddValueToList "ExpectedHeaders" value "FX"
+AddValueToList "ExpectedHeaders" value "OT%"
+AddValueToList "ExpectedHeaders" value "BID Price"
+AddValueToList "ExpectedHeaders" value "Cup Score Premium"
+AddValueToList "ExpectedHeaders" value "Rules - CO-Purchase (Advances)"
+AddValueToList "ExpectedHeaders" value "Rules – CO-Purchase (Weight Basis)"
+AddValueToList "ExpectedHeaders" value "Rules – CO-Purchase (Reimbuirs. Terms)"
+AddValueToList "ExpectedHeaders" value "Rules -CO-Purchase (Rules)"
+AddValueToList "ExpectedHeaders" value "Rules -CO-Purchase (Arbitration)"
+AddValueToList "ExpectedHeaders" value "Rules -CO-Purchase (Insurance)"
+AddValueToList "ExpectedHeaders" value "Rules – CO-Purchase (Add. Conditions)"
+AddValueToList "ExpectedHeaders" value "Rules – CO-Purchase (Approval Condit.)"
+AddValueToList "ExpectedHeaders" value "Rules – CO-Purchase (Stuffing)"
+AddValueToList "ExpectedHeaders" value "Rules – Contract Form – Fixation"
+
+DefineVariable type "int" as "col" with the value "1"
+DefineVariable type "int" as "idx" with the value "0"
+DefineVariable as "HeadersOk" with the value "true"
+DefineVariable as "HeaderError" with the value ""
+
+for 47 times {
+	Excel ReadCellText from the worksheet {WSName} from the cell {1,<<<col>>>} and save its value as {actualHeader}
+	DefineVariable as "expectedHeader" with the value "<<<ExpectedHeaders[<<<idx>>>]>>>"
+
+	if ("<<<actualHeader>>>" -ne "<<<expectedHeader>>>")
+		DefineVariable as "HeadersOk" with the value "false"
+		DefineVariable as "HeaderError" with the value "Header mismatch at col <<<col>>> | Expected: <<<expectedHeader>>> | Actual: <<<actualHeader>>>"
+		break
+	end
+
+	col++
+	idx++
+}
+
+if ("<<<HeadersOk>>>" -ne "true")
+	Message "TEMPLATE HEADER VALIDATION FAILED: <<<HeaderError>>>"
+	Excel Save WBName and close
+	Finish
+else
+	Message "TEMPLATE HEADER VALIDATION OK (47 columns)"
+end
+#%endregion
+
+
+#%region DETERMINE RESUME POINT (Processed → next Template row) ──────────────
+## The bot resumes based on how many entries exist in Processed column 1 (starting row 2).
+## This avoids counting the Processed header row.
+
+Excel ReadColumn from the worksheet {WSName} with the column index {1} start_at {2} and save its value as {TemplateColA} visible without nulls
+CountItems in TemplateColA and save_as TotalTemplateRows
+
+Excel ReadColumn from the worksheet {WSProcessed} with the column index {1} start_at {2} and save its value as {RowsProcessed} visible without nulls
+CountItems in RowsProcessed and save_as TotalRowsProcessed
+
+## Template data starts on row 2. If 0 processed, we start at row 2.
+MathOperation <<<TotalRowsProcessed>>> + 2 and save as Contador
+
+## Remaining items = TotalTemplateRows - TotalRowsProcessed
+MathOperation <<<TotalTemplateRows>>> - <<<TotalRowsProcessed>>> and save as Remaining
+
+Message "Resume: Processed=<<<TotalRowsProcessed>>> | Total=<<<TotalTemplateRows>>> | StartRow=<<<Contador>>> | Remaining=<<<Remaining>>>"
+
+if (<<<Remaining>>> <= 0)
+	Message "Nothing to process."
+	Excel Save WBName and close
+	Finish
+end
+#%endregion
+
+
+#%region START SAP SESSION ───────────────────────────────────────────────────
+## Establish the SAP session once, then process all rows.
+try
+	SAP RunSapInstance "AMCO ECC - QE0 Quality" 060 <<sapUser>> <<sapPass>> EN graphic
+catch as ex
+	Excel Save WBName and close
+	Finish "SAP login failed - cannot continue: <<<ex>>>"
+end
+#%endregion
+
+
+#%region PROCESS LOOP ────────────────────────────────────────────────────────
+for <<<Remaining>>> times {
+
+	#%region READ CURRENT TEMPLATE ROW ───────────────────────────────────────
+	## Take one row from Template as the contract creation request.
+
+	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,1} and save its value as {contractType}
+	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,2} and save its value as {orgData}
+	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,3} and save its value as {purchasingGroup}
+	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,4} and save its value as {priceType}
+	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,5} and save its value as {contractDate}
+	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,6} and save its value as {plant}
+	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,7} and save its value as {material}
+	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,8} and save its value as {quantity}
+	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,9} and save its value as {deliveryPeriodFrom}
+	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,10} and save its value as {deliveryPeriodTo}
+	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,11} and save its value as {bp}
+	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,12} and save its value as {paymentTerms}
+	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,13} and save its value as {incoterms}
+	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,14} and save its value as {currency}
+	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,15} and save its value as {origin}
+	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,16} and save its value as {destination}
+
+	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,17} and save its value as {characteristicsCertifications}
+	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,18} and save its value as {characteristicsCropYear}
+	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,19} and save its value as {characteristicsYieldFactor}
+	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,20} and save its value as {characteristicsProcess}
+	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,21} and save its value as {characteristicsRegion}
+	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,22} and save its value as {characteristicsBagCapacity}
+	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,23} and save its value as {characteristicsFaults}
+	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,24} and save its value as {characteristicsScreenAndPreparation}
+	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,25} and save its value as {characteristicsCustomerProfile}
+	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,26} and save its value as {characteristicsTypeCoffee}
+
+	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,27} and save its value as {textGeneralRemarks}
+	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,28} and save its value as {textProducerFloId}
+	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,29} and save its value as {textPrice}
+	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,30} and save its value as {textAdditionalCondition}
+
+	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,31} and save its value as {precio}
+	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,32} and save its value as {marketPrice}
+	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,33} and save its value as {coverMonth}
+	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,34} and save its value as {fx}
+	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,35} and save its value as {otPercent}
+	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,36} and save its value as {bidPrice}
+	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,37} and save its value as {cupScorePremium}
+
+	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,38} and save its value as {rulesCoPurchaseAdvances}
+	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,39} and save its value as {rulesCoPurchaseWeightBasis}
+	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,40} and save its value as {rulesCoPurchaseReimbursTerms}
+	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,41} and save its value as {rulesCoPurchaseRules}
+	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,42} and save its value as {rulesCoPurchaseArbitration}
+	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,43} and save its value as {rulesCoPurchaseInsurance}
+	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,44} and save its value as {rulesCoPurchaseAdditionalConditions}
+	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,45} and save its value as {rulesCoPurchaseApprovalConditions}
+	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,46} and save its value as {rulesCoPurchaseStuffing}
+	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,47} and save its value as {rulesContractFormFixation}
+
+	## Build characteristics payload for SAP mapping (store values, not variable names)
+	DefineVariable type "List" as "characteristics"
+	AddValueToList "characteristics" value "Certifications,<<<characteristicsCertifications>>>"
+	AddValueToList "characteristics" value "Crop year,<<<characteristicsCropYear>>>"
+	AddValueToList "characteristics" value "Yield Factor,<<<characteristicsYieldFactor>>>"
+	AddValueToList "characteristics" value "Process,<<<characteristicsProcess>>>"
+	AddValueToList "characteristics" value "Region,<<<characteristicsRegion>>>"
+	AddValueToList "characteristics" value "Bag Capacity,<<<characteristicsBagCapacity>>>"
+	AddValueToList "characteristics" value "Faults Green Coffee,<<<characteristicsFaults>>>"
+	AddValueToList "characteristics" value "Screen and Preparation,<<<characteristicsScreenAndPreparation>>>"
+	AddValueToList "characteristics" value "Type of Coffee,<<<characteristicsTypeCoffee>>>"
+	#%endregion
+
+
+	#%region CREATE CONTRACT IN SAP ───────────────────────────────────────────
+	try
+		## Reset to transaction for each record so navigation is consistent
+		SAP StartTransaction zwb21
+
+		#%region Entry Screen (type + org) ───────────────────────────────────
+		## Contract Type (robust check: starts with P)
+		if ("<<<contractType>>>" -like "P*")
+			SAP SelectComboBox id wnd[0]/usr/cmbP_LSCTP1 P
+		else
+			SAP SelectComboBox id wnd[0]/usr/cmbP_LSCTP1 S
+		end
+
+		SAP WriteText ElementId wnd[0]/usr/ctxtP_ORG1 Text "<<<orgData>>>"
+		SAP WriteText ElementId wnd[0]/usr/ctxtP_PGRP1 Text "<<<purchasingGroup>>>"
+		SAP SendKey 0
+		SAP ClickButton id wnd[0]/tbar[1]/btn[8]
+		#%endregion
+
+
+		#%region Header Details ──────────────────────────────────────────────
+		if ("<<<priceType>>>" -eq "FLAT")
+			SAP SelectComboBox id wnd[0]/usr/subSUBSCREEN:ZACMRE_DEAL_CONTRACT:2200/cmbSG_HEADER_DETAILS-LSPRG 1
+		else
+			SAP SelectComboBox id wnd[0]/usr/subSUBSCREEN:ZACMRE_DEAL_CONTRACT:2200/cmbSG_HEADER_DETAILS-LSPRG 4
+		end
+
+		SAP WriteText ElementId wnd[0]/usr/subSUBSCREEN:ZACMRE_DEAL_CONTRACT:2200/ctxtSG_HEADER_DETAILS-BUDAT Text "<<<contractDate>>>"
+		SAP WriteText ElementId wnd[0]/usr/subSUBSCREEN:ZACMRE_DEAL_CONTRACT:2200/ctxtSG_HEADER_DETAILS-WERKS Text "<<<plant>>>"
+		SAP WriteText ElementId wnd[0]/usr/subSUBSCREEN:ZACMRE_DEAL_CONTRACT:2200/ctxtSG_HEADER_DETAILS-MATNR Text "<<<material>>>"
+		SAP WriteText ElementId wnd[0]/usr/subSUBSCREEN:ZACMRE_DEAL_CONTRACT:2200/txtSG_HEADER_DETAILS-MENGE Text "<<<quantity>>>"
+		SAP WriteText ElementId wnd[0]/usr/subSUBSCREEN:ZACMRE_DEAL_CONTRACT:2200/ctxtSG_HEADER_DETAILS-LIFNR Text "<<<bp>>>"
+		SAP SendKey 0
+
+		SAP WriteText ElementId wnd[0]/usr/subSUBSCREEN:ZACMRE_DEAL_CONTRACT:2200/ctxtSG_HEADER_DETAILS-DATE_FROM Text "<<<deliveryPeriodFrom>>>"
+		SAP WriteText ElementId wnd[0]/usr/subSUBSCREEN:ZACMRE_DEAL_CONTRACT:2200/ctxtSG_HEADER_DETAILS-DATE_TO Text "<<<deliveryPeriodTo>>>"
+		SAP WriteText ElementId wnd[0]/usr/subSUBSCREEN:ZACMRE_DEAL_CONTRACT:2200/ctxtSG_HEADER_DETAILS-TERM Text "<<<paymentTerms>>>"
+		SAP WriteText ElementId wnd[0]/usr/subSUBSCREEN:ZACMRE_DEAL_CONTRACT:2200/ctxtSG_HEADER_DETAILS-INCO2 Text "<<<incoterms>>>"
+
+		## Origin/Destination (write as provided; if Origin is empty, SAP may accept or validate)
+		SAP WriteText ElementId wnd[0]/usr/subSUBSCREEN:ZACMRE_DEAL_CONTRACT:2200/ctxtSG_HEADER_DETAILS-CITY_ORIGIN Text "<<<origin>>>"
+		SAP WriteText ElementId wnd[0]/usr/subSUBSCREEN:ZACMRE_DEAL_CONTRACT:2200/ctxtSG_HEADER_DETAILS-CITY_DESTINATION Text "<<<destination>>>"
+		SAP SendKey 0
+		#%endregion
+
+
+		#%region Characteristics ─────────────────────────────────────────────
+		## Apply provided characteristics to SAP table where names match.
+		SAP ClickButton id wnd[0]/tbar[1]/btn[7]
+
+		DefineVariable as "counter" with the value "0"
+
+		for 11 times {
+			try
+				SAP ReadElement wnd[0]/usr/subCHARACTERISTICS:SAPLCEI0:1400/tblSAPLCEI0CHARACTER_VALUES/ctxtRCTMS-MNAME[0,<<<counter>>>] as key
+			catch
+				break
+			end
+
+			## Stop if table row is empty
+			if ("<<<key>>>" -eq "")
+				break
+			end
+
+			foreach item in characteristics {
+				ApplyRegex ".+?(?=,)" to the string "<<<item>>>" and save as "charName"
+				if ("<<<key>>>" -eq "<<<charName>>>")
+					ApplyRegex "(?<=,).*$" to the string "<<<item>>>" and save as "charValue"
+					SAP WriteText ElementId wnd[0]/usr/subCHARACTERISTICS:SAPLCEI0:1400/tblSAPLCEI0CHARACTER_VALUES/ctxtRCTMS-MWERT[1,<<<counter>>>] Text "<<<charValue>>>"
+					break
+				end
+			}
+
+			MathOperation <<<counter>>> + 1 and save as counter
+		}
+
+		SAP VerticalScroll GridId wnd[0]/usr/subCHARACTERISTICS:SAPLCEI0:1400/tblSAPLCEI0CHARACTER_VALUES Pos 12
+		DefineVariable as "counter" with the value "0"
+
+		for 11 times {
+			try
+				SAP ReadElement wnd[0]/usr/subCHARACTERISTICS:SAPLCEI0:1400/tblSAPLCEI0CHARACTER_VALUES/ctxtRCTMS-MNAME[0,<<<counter>>>] as key
+			catch
+				break
+			end
+
+			if ("<<<key>>>" -eq "")
+				break
+			end
+
+			foreach item in characteristics {
+				ApplyRegex ".+?(?=,)" to the string "<<<item>>>" and save as "charName"
+				if ("<<<key>>>" -eq "<<<charName>>>")
+					ApplyRegex "(?<=,).*$" to the string "<<<item>>>" and save as "charValue"
+					SAP WriteText ElementId wnd[0]/usr/subCHARACTERISTICS:SAPLCEI0:1400/tblSAPLCEI0CHARACTER_VALUES/ctxtRCTMS-MWERT[1,<<<counter>>>] Text "<<<charValue>>>"
+					break
+				end
+			}
+
+			MathOperation <<<counter>>> + 1 and save as counter
+		}
+
+		## Return to contract
+		SAP ClickButton id wnd[0]/tbar[0]/btn[3]
+		#%endregion
+
+
+		#%region Price Details ───────────────────────────────────────────────
+		SAP WriteText ElementId wnd[0]/usr/subSS_HD_PRICE_DETAILS:ZACMRE_DEAL_CONTRACT:2800/ctxtSG_HEADER_PRICE_SC-COVER_MONTH_VAL Text "<<<coverMonth>>>"
+
+		## Market Price normalized for SAP decimal format (if needed)
+		ReplaceFromVariable {marketPrice} this {.} for {,}
+		SAP WriteText ElementId wnd[0]/usr/subSS_HD_PRICE_DETAILS:ZACMRE_DEAL_CONTRACT:2800/txtSG_HEADER_PRICE_SC-MKT_FUT_VAL Text "<<<marketPrice>>>"
+
+		SAP WriteText ElementId wnd[0]/usr/subSS_HD_PRICE_DETAILS:ZACMRE_DEAL_CONTRACT:2800/txtSG_HEADER_PRICE_SC-FX Text "<<<fx>>>"
+		SAP SendKey 0
+
+		SAP WriteText ElementId wnd[0]/usr/subSS_PRICE_DETAILS:ZACMRE_DEAL_CONTRACT:7000/txt<SG>-BID-BASE_PRICE_VAL Text "<<<bidPrice>>>"
+		SAP WriteText ElementId wnd[0]/usr/subSS_PRICE_DETAILS:ZACMRE_DEAL_CONTRACT:7000/txt<SG>-BID-CUPSCORE_VAL Text "<<<cupScorePremium>>>"
+		SAP SendKey 0
+
+		SAP ClickButton id wnd[0]/tbar[1]/btn[8]
+		SAP ClickButton id wnd[1]/usr/btnBUTTON_1
+		#%endregion
+
+
+		#%region Texts ───────────────────────────────────────────────────────
+		SAP SelectTab id "wnd[0]/usr/subSCREEN:SAPLWB2A:0250/tabsSTRIPT_AH_HEAD/tabpTEXT"
+
+		## General Remarks
+		SAP SelectTreeItem TreeId wnd[0]/usr/subSCREEN:SAPLWB2A:0250/tabsSTRIPT_AH_HEAD/tabpTEXT/ssubHEADER_SUB:SAPLWB2A:0137/subSUBSCREEN_TEXT:SAPLV70T:2100/cntlSPLITTER_CONTAINER/shellcont/shellcont/shell/shellcont[0]/shell Node "0001" Item "Column1"
+		SAP DoubleClickTreeItem TreeId wnd[0]/usr/subSCREEN:SAPLWB2A:0250/tabsSTRIPT_AH_HEAD/tabpTEXT/ssubHEADER_SUB:SAPLWB2A:0137/subSUBSCREEN_TEXT:SAPLV70T:2100/cntlSPLITTER_CONTAINER/shellcont/shellcont/shell/shellcont[0]/shell Node "0001" Item "Column1"
+		SAP WriteText ElementId wnd[0]/usr/subSCREEN:SAPLWB2A:0250/tabsSTRIPT_AH_HEAD/tabpTEXT/ssubHEADER_SUB:SAPLWB2A:0137/subSUBSCREEN_TEXT:SAPLV70T:2100/cntlSPLITTER_CONTAINER/shellcont/shellcont/shell/shellcont[1]/shell Text "<<<textGeneralRemarks>>>"
+
+		## Producer FLO ID
+		SAP SelectTreeItem TreeId wnd[0]/usr/subSCREEN:SAPLWB2A:0250/tabsSTRIPT_AH_HEAD/tabpTEXT/ssubHEADER_SUB:SAPLWB2A:0137/subSUBSCREEN_TEXT:SAPLV70T:2100/cntlSPLITTER_CONTAINER/shellcont/shellcont/shell/shellcont[0]/shell Node "Z043" Item "Column1"
+		SAP DoubleClickTreeItem TreeId wnd[0]/usr/subSCREEN:SAPLWB2A:0250/tabsSTRIPT_AH_HEAD/tabpTEXT/ssubHEADER_SUB:SAPLWB2A:0137/subSUBSCREEN_TEXT:SAPLV70T:2100/cntlSPLITTER_CONTAINER/shellcont/shellcont/shell/shellcont[0]/shell Node "Z043" Item "Column1"
+		SAP WriteText ElementId wnd[0]/usr/subSCREEN:SAPLWB2A:0250/tabsSTRIPT_AH_HEAD/tabpTEXT/ssubHEADER_SUB:SAPLWB2A:0137/subSUBSCREEN_TEXT:SAPLV70T:2100/cntlSPLITTER_CONTAINER/shellcont/shellcont/shell/shellcont[1]/shell Text "<<<textProducerFloId>>>"
+
+		## Price
+		SAP SelectTreeItem TreeId wnd[0]/usr/subSCREEN:SAPLWB2A:0250/tabsSTRIPT_AH_HEAD/tabpTEXT/ssubHEADER_SUB:SAPLWB2A:0137/subSUBSCREEN_TEXT:SAPLV70T:2100/cntlSPLITTER_CONTAINER/shellcont/shellcont/shell/shellcont[0]/shell Node "Z009" Item "Column1"
+		SAP DoubleClickTreeItem TreeId wnd[0]/usr/subSCREEN:SAPLWB2A:0250/tabsSTRIPT_AH_HEAD/tabpTEXT/ssubHEADER_SUB:SAPLWB2A:0137/subSUBSCREEN_TEXT:SAPLV70T:2100/cntlSPLITTER_CONTAINER/shellcont/shellcont/shell/shellcont[0]/shell Node "Z009" Item "Column1"
+		SAP WriteText ElementId wnd[0]/usr/subSCREEN:SAPLWB2A:0250/tabsSTRIPT_AH_HEAD/tabpTEXT/ssubHEADER_SUB:SAPLWB2A:0137/subSUBSCREEN_TEXT:SAPLV70T:2100/cntlSPLITTER_CONTAINER/shellcont/shellcont/shell/shellcont[1]/shell Text "<<<textPrice>>>"
+
+		## Additional Conditions
+		SAP SelectTreeItem TreeId wnd[0]/usr/subSCREEN:SAPLWB2A:0250/tabsSTRIPT_AH_HEAD/tabpTEXT/ssubHEADER_SUB:SAPLWB2A:0137/subSUBSCREEN_TEXT:SAPLV70T:2100/cntlSPLITTER_CONTAINER/shellcont/shellcont/shell/shellcont[0]/shell Node "Z048" Item "Column1"
+		SAP DoubleClickTreeItem TreeId wnd[0]/usr/subSCREEN:SAPLWB2A:0250/tabsSTRIPT_AH_HEAD/tabpTEXT/ssubHEADER_SUB:SAPLWB2A:0137/subSUBSCREEN_TEXT:SAPLV70T:2100/cntlSPLITTER_CONTAINER/shellcont/shellcont/shell/shellcont[0]/shell Node "Z048" Item "Column1"
+		SAP WriteText ElementId wnd[0]/usr/subSCREEN:SAPLWB2A:0250/tabsSTRIPT_AH_HEAD/tabpTEXT/ssubHEADER_SUB:SAPLWB2A:0137/subSUBSCREEN_TEXT:SAPLV70T:2100/cntlSPLITTER_CONTAINER/shellcont/shellcont/shell/shellcont[1]/shell Text "<<<textAdditionalCondition>>>"
+		#%endregion
+
+
+		#%region Rules ───────────────────────────────────────────────────────
+		SAP SelectTab id "wnd[0]/usr/subSCREEN:SAPLWB2A:0250/tabsSTRIPT_AH_HEAD/tabpAOHD"
+
+		SAP SelectRb id wnd[0]/usr/subSCREEN:SAPLWB2A:0251/tabsSTRIPT_AH_HEAD/tabpAOHD/ssubHEADER_SUB:SAPLWB2A:0145/subTRADE:SAPLWB2B_SCREEN_HANDLING:0101/subCUSTOMER_DATA:SAPLWB2B_SCREEN_HANDLING:8001/ssubCUSTOMER_DATA:SAPLZACMFG_SCREEN_GRP_CTRL:0010/subSS_HD_1:SAPLZACMFG_SCREEN_GRP_CTRL:0100/ssubSS_TEXTS:SAPLZACMFG_SCREEN_GRP_CTRL:0300/rad<SG_DYNPRO>-SCREEN_ELEMENT14
+
+		SAP SelectComboBox id wnd[0]/usr/subSCREEN:SAPLWB2A:0251/tabsSTRIPT_AH_HEAD/tabpAOHD/ssubHEADER_SUB:SAPLWB2A:0145/subTRADE:SAPLWB2B_SCREEN_HANDLING:0101/subCUSTOMER_DATA:SAPLWB2B_SCREEN_HANDLING:8001/ssubCUSTOMER_DATA:SAPLZACMFG_SCREEN_GRP_CTRL:0010/subSS_HD_1:SAPLZACMFG_SCREEN_GRP_CTRL:0100/ssubSS_TEXTS:SAPLZACMFG_SCREEN_GRP_CTRL:0300/cmb<SG_DYNPRO>-SCREEN_ELEMENT2 "AN70 ADV OF 70% DPDING ON CREDIT LMT"
+
+		SAP SelectComboBox id wnd[0]/usr/subSCREEN:SAPLWB2A:0251/tabsSTRIPT_AH_HEAD/tabpAOHD/ssubHEADER_SUB:SAPLWB2A:0145/subTRADE:SAPLWB2B_SCREEN_HANDLING:0101/subCUSTOMER_DATA:SAPLWB2B_SCREEN_HANDLING:8001/ssubCUSTOMER_DATA:SAPLZACMFG_SCREEN_GRP_CTRL:0010/subSS_HD_1:SAPLZACMFG_SCREEN_GRP_CTRL:0100/ssubSS_TEXTS:SAPLZACMFG_SCREEN_GRP_CTRL:0300/cmb<SG_DYNPRO>-SCREEN_ELEMENT4 "NSW050_FR NET SHIPPED WEIGHTS 0.5 %F"
+
+		SAP SelectComboBox id wnd[0]/usr/subSCREEN:SAPLWB2A:0251/tabsSTRIPT_AH_HEAD/tabpAOHD/ssubHEADER_SUB:SAPLWB2A:0145/subTRADE:SAPLWB2B_SCREEN_HANDLING:0101/subCUSTOMER_DATA:SAPLWB2B_SCREEN_HANDLING:8001/ssubCUSTOMER_DATA:SAPLZACMFG_SCREEN_GRP_CTRL:0010/subSS_HD_1:SAPLZACMFG_SCREEN_GRP_CTRL:0100/ssubSS_TEXTS:SAPLZACMFG_SCREEN_GRP_CTRL:0300/cmb<SG_DYNPRO>-SCREEN_ELEMENT6 "CADE LESS 5% AGST TRACE &/OR TC"
+
+		SAP SelectComboBox id wnd[0]/usr/subSCREEN:SAPLWB2A:0251/tabsSTRIPT_AH_HEAD/tabpAOHD/ssubHEADER_SUB:SAPLWB2A:0145/subTRADE:SAPLWB2B_SCREEN_HANDLING:0101/subCUSTOMER_DATA:SAPLWB2B_SCREEN_HANDLING:8001/ssubCUSTOMER_DATA:SAPLZACMFG_SCREEN_GRP_CTRL:0010/subSS_HD_1:SAPLZACMFG_SCREEN_GRP_CTRL:0100/ssubSS_TEXTS:SAPLZACMFG_SCREEN_GRP_CTRL:0300/cmb<SG_DYNPRO>-SCREEN_ELEMENT8 "CONTRATO_MARCO"
+
+		SAP SelectComboBox id wnd[0]/usr/subSCREEN:SAPLWB2A:0251/tabsSTRIPT_AH_HEAD/tabpAOHD/ssubHEADER_SUB:SAPLWB2A:0145/subTRADE:SAPLWB2B_SCREEN_HANDLING:0101/subCUSTOMER_DATA:SAPLWB2B_SCREEN_HANDLING:8001/ssubCUSTOMER_DATA:SAPLZACMFG_SCREEN_GRP_CTRL:0010/subSS_HD_1:SAPLZACMFG_SCREEN_GRP_CTRL:0100/ssubSS_TEXTS:SAPLZACMFG_SCREEN_GRP_CTRL:0300/cmb<SG_DYNPRO>-SCREEN_ELEMENT10 "COL"
+
+		SAP SelectComboBox id wnd[0]/usr/subSCREEN:SAPLWB2A:0251/tabsSTRIPT_AH_HEAD/tabpAOHD/ssubHEADER_SUB:SAPLWB2A:0145/subTRADE:SAPLWB2B_SCREEN_HANDLING:0101/subCUSTOMER_DATA:SAPLWB2B_SCREEN_HANDLING:8001/ssubCUSTOMER_DATA:SAPLZACMFG_SCREEN_GRP_CTRL:0010/subSS_HD_1:SAPLZACMFG_SCREEN_GRP_CTRL:0100/ssubSS_TEXTS:SAPLZACMFG_SCREEN_GRP_CTRL:0300/cmb<SG_DYNPRO>-SCREEN_ELEMENT16 "FLAT-PARCHMENT_RFA_ACOPIADOR"
+
+		SAP SelectComboBox id wnd[0]/usr/subSCREEN:SAPLWB2A:0251/tabsSTRIPT_AH_HEAD/tabpAOHD/ssubHEADER_SUB:SAPLWB2A:0145/subTRADE:SAPLWB2B_SCREEN_HANDLING:0101/subCUSTOMER_DATA:SAPLWB2B_SCREEN_HANDLING:8001/ssubCUSTOMER_DATA:SAPLZACMFG_SCREEN_GRP_CTRL:0010/subSS_HD_1:SAPLZACMFG_SCREEN_GRP_CTRL:0100/ssubSS_TEXTS:SAPLZACMFG_SCREEN_GRP_CTRL:0300/cmb<SG_DYNPRO>-SCREEN_ELEMENT18 "SAQ-PARCHMENT"
+
+		SAP ElementFocus ElementId wnd[0]/usr/subSCREEN:SAPLWB2A:0251/tabsSTRIPT_AH_HEAD/tabpAOHD/ssubHEADER_SUB:SAPLWB2A:0145/subTRADE:SAPLWB2B_SCREEN_HANDLING:0101/subCUSTOMER_DATA:SAPLWB2B_SCREEN_HANDLING:8001/ssubCUSTOMER_DATA:SAPLZACMFG_SCREEN_GRP_CTRL:0010/subSS_HD_1:SAPLZACMFG_SCREEN_GRP_CTRL:0100/ssubSS_TEXTS:SAPLZACMFG_SCREEN_GRP_CTRL:0300/rad<SG_DYNPRO>-SCREEN_ELEMENT22
+		#%endregion
+
+
+		#%region Finalize / Save ──────────────────────────────────────────────
+		SAP ClickButton id wnd[0]/tbar[0]/btn[11]
+		SAP ClickButton id wnd[0]/tbar[0]/btn[15]
+		#%endregion
+
+
+		#%region MARK SUCCESS IN EXCEL (Processed) ─────────────────────────────
+		## Log the Template row number so the bot can resume deterministically.
+		GetCurrentDate format={"MM/dd/yyyy HH:mm:ss" en} and save as NowHuman
+		Excel Append from WSProcessed at [1 ="<<<Contador>>>",2 ="SUCCESS",3 ="<<<NowHuman>>>",4 ="<<<runId>>>"]
+		Excel Save WBName
+		#%endregion
+
+	catch as ex
+		#%region FAILURE HANDLING ────────────────────────────────────────────
+		## Preserve evidence and mark the row as failed so it can be reviewed or retried intentionally.
+		Titanium CaptureImage and save as <<<evidenceDir>>>\SAP_Fail_Row<<<Contador>>>_<<<runId>>>.png
+
+		GetCurrentDate format={"MM/dd/yyyy HH:mm:ss" en} and save as NowHuman
+		Excel Append from WSProcessed at [1 ="<<<Contador>>>",2 ="FAIL",3 ="<<<NowHuman>>>",4 ="<<<runId>>>",5 ="<<<ex>>>"]
+		Excel Save WBName
+
+		## Continue-on-error: log failure and proceed to next row
+		#%endregion
+	end
+	#%endregion
+
+
+	#%region ADVANCE TO NEXT ROW ──────────────────────────────────────────────
+	Contador++
+	#%endregion
+}
+#%endregion
+
+
+#%region CLEANUP ─────────────────────────────────────────────────────────────
+Excel Save WBName and close
+SystemNotify Type "Notification" with message "SAP bot finished run: <<<runId>>>"
+#%endregion

@@ -1,0 +1,60 @@
+---
+description: FRIDA Web/Browpet reader rules - Web Evaluate, selectors, waiting patterns
+alwaysApply: false
+---
+
+# FRIDA Web/Browpet Reader Rules
+
+## Web Evaluate
+
+`Web Evaluate` writes output to `web2Output` by default. Always copy immediately to a purpose-specific variable:
+
+```
+Web Evaluate frame = "0" `document.querySelectorAll('.item').length`
+DefineVariable as "itemCount" with the value "<<<web2Output>>>"
+```
+
+## Selector Safety
+
+**Escape quotes in attribute selectors** to avoid lexical errors:
+
+```
+## Correct - escaped quotes
+selector="input[aria-labelledby^=\"i1 \"]"
+
+## Wrong - nested quotes cause lexical errors
+selector="input[aria-labelledby^='i1 ']"
+```
+
+## Robust Waiting Pattern
+
+For dynamic pages, use a retry loop before interacting:
+
+```
+DefineVariable type "int" as "retries" with the value "0"
+DefineVariable as "found" with the value "false"
+
+while ("<<<found>>>" -ne "true") {
+    Web ElementExists in selector=".target-element" save as "found" timeout = 2000
+    if ("<<<found>>>" -eq "true")
+        break
+    end
+    retries++
+    if (<<<retries>>> > 10)
+        Finish "Element not found after 10 retries"
+    end
+}
+```
+
+## Instruction Preference
+
+Prefer standard Web instructions over `Web Evaluate` when possible:
+
+| Task | Preferred | Fallback |
+|------|-----------|----------|
+| Click | `Web Click` | `Web Evaluate` |
+| Type text | `Web Type` | `Web Evaluate` |
+| Clear + type | `Web InsertValue` | `Web Evaluate` |
+| Extract text | `Web Extract` | `Web Evaluate` |
+
+Use `Web Evaluate` for complex DOM operations or when standard instructions don't work.

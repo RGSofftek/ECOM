@@ -1,0 +1,123 @@
+---
+description: FRIDA/Turing core language rules - syntax, variables, comparisons, sendmail, structure, antipatterns
+alwaysApply: true
+---
+
+# FRIDA Core Language Rules
+
+## Syntax & Structure
+
+**All instructions must be single-line** - no reader instruction should break across lines.
+
+Only control flow blocks span multiple lines:
+
+```
+for N times { ... }
+foreach item in list { ... }
+while (condition) { ... }
+if (condition) ... end
+switch (expression) { case "val": ... end }
+try ... catch ... end
+```
+
+**Block closings:**
+- `if`/`else` blocks end with `end`
+- `try`/`catch` blocks end with `end`
+- `for`, `foreach`, `while` blocks end with `}`
+- `switch` blocks end with `}`, each `case` and `default` ends with `end`
+
+**Code organization:**
+- Use `#%region NAME` / `#%endregion` to separate logical phases (names are flexible)
+- Comments: `##` normal, `#*` important, `#?` warning, `#!` error
+
+## Variables
+
+**Global vs Local:**
+- Global (UI Variables panel): `<<Var>>`
+- Local (runtime): `<<<var>>>`
+
+**Declaration:**
+
+```
+## Preferred
+DefineVariable as "name" with the value "value"
+
+## Lists - must declare before use
+DefineVariable type "List" as "MyList"
+
+## Only use type "Date" for actual dates
+DefineVariable type "Date" as "myDate" with the value "2024-01-15"
+```
+
+**String interpolation requires quotes:**
+
+```
+## Correct
+"<<<var>>>"
+"<<<path>>>\file.txt"
+
+## Wrong - missing quotes
+<<<var>>>
+```
+
+**List indexing:**
+
+```
+<<<MyList[<<<Index>>>]>>>
+<<<MyList[0]>>>
+<<<MyList[-1]>>>
+```
+
+## Comparisons
+
+**Boolean outputs are strings** - most functions like `ElementExists` return `"true"` or `"false"` as strings.
+
+```
+## Correct - string comparison
+if ("<<<exists>>>" -eq "true")
+    ## do something
+end
+
+## Wrong - treats as boolean
+if (<<<exists>>>)
+    ## will fail
+end
+```
+
+**Operators:** Use `-eq`, `-ne`, `-gt`, `-lt`, `-ge`, `-le`
+
+**While limitations:** Cannot use `-AND`/`-OR`/`-NOT`/`-XOR` in `while` conditions. Keep conditions simple; use `if` + `break` inside the loop for complex logic.
+
+```
+## Correct
+while ("<<<continue>>>" -eq "true") {
+    if ("<<<condition1>>>" -eq "true")
+        if ("<<<condition2>>>" -eq "false")
+            break
+        end
+    end
+}
+
+## Wrong - compound logic in while
+while ("<<<a>>>" -eq "true" -AND "<<<b>>>" -eq "false") {
+    ## will fail
+}
+```
+
+## SendMail
+
+**Grammar:**
+
+```
+SendMail with subject "..." to "..." with body "..."
+SendMail with subject "..." to "..." with body "..." and a file attachment "..."
+```
+
+**Avoid special characters** that may break the lexer - use hyphen `-` instead of en dash `–`.
+
+## Antipatterns
+
+- **Never break instructions across lines** (applies to all readers)
+- **Never treat `"true"`/`"false"` as real booleans** - always string compare
+- **No indirect variable dereferencing** (variable name stored in another variable) unless confirmed
+- **Avoid nested quotes in selectors** that cause lexical errors

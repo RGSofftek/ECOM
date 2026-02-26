@@ -1,0 +1,90 @@
+---
+description: 
+alwaysApply: false
+---
+
+# FRIDA SAP Reader Rules
+
+## Guard Against UI Timing
+
+Wrap fragile SAP blocks in `try/catch` and retry if needed:
+
+```
+DefineVariable type "int" as "attempts" with the value "0"
+DefineVariable as "success" with the value "false"
+
+while ("<<<success>>>" -ne "true") {
+    try
+        SAP WriteText ElementId wnd[0]/usr/txtField Text "<<<value>>>"
+        SAP SendKey 0
+        DefineVariable as "success" with the value "true"
+    catch as ex
+        attempts++
+        if (<<<attempts>>> > 3)
+            Finish "SAP field write failed after 3 attempts: <<<ex>>>"
+        end
+        Sleep 1000
+    end
+}
+```
+
+## Validate Data Before SAP Writes
+
+If values from Excel can be invalid, validate before writing to SAP:
+
+```
+## Validate required field
+if ("<<<fieldValue>>>" -eq "")
+    Excel Append from WSProcessed at [1 ="<<<rowNum>>>", 2 ="FAIL", 3 ="Empty required field"]
+    Excel Save WB
+    ## Skip to next item - don't write to SAP
+end
+
+## Validate format
+ApplyRegex "^\d{10}$" to the string "<<<documentNumber>>>" and save as "isValid"
+if ("<<<isValid>>>" -eq "")
+    Excel Append from WSProcessed at [1 ="<<<rowNum>>>", 2 ="FAIL", 3 ="Invalid document number format"]
+    Excel Save WB
+end
+```
+
+## Continue-on-Error Policy
+
+For batch processing, log failures and continue to the next row:
+
+```
+foreach item in itemList {
+    try
+        SAP StartTransaction VA01
+        ## ... SAP operations ...
+        Excel Append from WSProcessed at [1 ="<<<itemId>>>", 2 ="SUCCESS", 3 ="<<<timestamp>>>"]
+    catch as ex
+        ## Log failure but continue
+        Excel Append from WSProcessed at [1 ="<<<itemId>>>", 2 ="FAIL", 3 ="<<<ex>>>"]
+        ## Optional: capture evidence
+        Titanium CaptureImage and save in "<<<evidencePath>>>\<<<itemId>>>_error.png"
+    end
+    Excel Save WB
+}
+```
+
+## When to Use Finish
+
+Only use `Finish` for systemic errors that affect the entire run:
+
+```
+## Systemic error - stop everything
+try
+    SAP RunSapInstance "PRD" 100 <<sapUser>> <<sapPassword>> EN graphic
+catch as ex
+    Finish "SAP login failed - cannot continue: <<<ex>>>"
+end
+
+## Row-level error - log and continue (don't Finish)
+try
+    SAP WriteText ElementId wnd[0]/usr/txtField Text "<<<value>>>"
+catch as ex
+    ## Log but don't Finish
+    Excel Append from WSProcessed at [1 ="<<<rowNum>>>", 2 ="FAIL", 3 ="<<<ex>>>"]
+end
+```
