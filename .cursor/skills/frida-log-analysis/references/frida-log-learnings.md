@@ -1,0 +1,59 @@
+---
+name: frida-log-learnings
+description: Persistent memory of user-confirmed FRIDA log diagnoses and resolutions, to be consulted after error detection and before presenting conclusions.
+---
+
+# FRIDA Log Learnings
+
+Consult this file after finding errors and before presenting conclusions.
+If a known pattern matches, use the confirmed root cause and resolution instead of guessing.
+
+## Known error patterns
+
+### SAP ClickButton: control not found by id
+- **First seen**: 2026-03-03
+- **Log excerpt**:
+  ```text
+  3/3/2026 12:27:33 PM - SAP ClickButton id wnd[0]/tbar[1]/btn[7] : Running
+  3/3/2026 12:27:33 PM - error: ClickButton id wnd[0]/tbar[1]/btn[7] : System.Runtime.InteropServices.COMException (0x0000026B): The control could not be found by id.
+  3/3/2026 12:27:33 PM - SAP ClickButton id wnd[0]/tbar[1]/btn[7] :  (Line: 397) : Error
+  3/3/2026 12:27:36 PM - ## Continue-on-error: log failure and proceed to next row : Success
+  ```
+- **Actual root cause**: SAP screen was in an unexpected state (e.g., error dialog or different layout), so the toolbar button with id `wnd[0]/tbar[1]/btn[7]` was not present when FRIDA tried to click it.
+- **Resolution**: Ensure that the script only attempts this click when the expected screen is active, or add guard checks (e.g., verify status messages, check screen elements) before clicking. Treat this as a cascade error when an upstream SAP validation error is present.
+
+### SAP WriteText: COMException invalid argument
+- **First seen**: 2026-03-03
+- **Log excerpt**:
+  ```text
+  3/2/2026 4:49:40 PM - SAP WriteText ElementId wnd[0]/usr/subSS_HD_PRICE_DETAILS:ZACMRE_DEAL_CONTRACT:2800/ctxtSG_HEADER_PRICE_SC-COVER_MONTH_VAL Text "" : Running
+  3/2/2026 4:49:40 PM - error: WriteText ElementId wnd[0]/usr/subSS_HD_PRICE_DETAILS:ZACMRE_DEAL_CONTRACT:2800/ctxtSG_HEADER_PRICE_SC-COVER_MONTH_VAL Text "" : System.Runtime.InteropServices.COMException (0x00000265): The method got an invalid argument.
+  3/2/2026 4:49:40 PM - SAP WriteText ElementId wnd[0]/usr/subSS_HD_PRICE_DETAILS:ZACMRE_DEAL_CONTRACT:2800/ctxtSG_HEADER_PRICE_SC-COVER_MONTH_VAL Text "" :  (Line: 455) : Error
+  ```
+- **Actual root cause**: FRIDA attempted to write an empty or invalid value into a SAP text field that does not accept that argument (e.g., required field or constrained domain).
+- **Resolution**: Validate the value before writing (ensure it is non-empty and within expected domain), or adjust the script so it skips/handles cases where the value is not valid for the target field.
+
+### Excel LoadWBook: document missing or corrupted
+- **First seen**: 2026-03-03
+- **Log excerpt**:
+  ```text
+  3/3/2026 12:19:43 PM - Excel LoadWBook "<<excelFile>>" as WBName : Running
+  3/3/2026 12:19:45 PM - Error loading the book, please verify that the document exists or is not corrupted.
+  3/3/2026 12:19:45 PM - Excel LoadWBook "<<excelFile>>" as WBName : (Line: 40) : Error
+  ```
+- **Actual root cause**: Excel workbook could not be opened (file path wrong, file missing, file locked, or corrupted).
+- **Resolution**: Verify the `excelFile` path, ensure the file exists and is accessible, and check that no other process is locking or corrupting the workbook before running the FRIDA process.
+
+<!--
+Template for new entries:
+
+### [Pattern title]
+- **First seen**: [YYYY-MM-DD]
+- **Log excerpt**:
+  ```text
+  [2–5 key lines showing the pattern]
+  ```
+- **Actual root cause**: [user-confirmed explanation]
+- **Resolution**: [how it was fixed or what to check]
+-->
+

@@ -46,6 +46,17 @@ try ... catch ... end
 - Use `#%region NAME` / `#%endregion` to separate logical phases (names are flexible)
 - Comments: `##` normal, `#*` important, `#?` warning, `#!` error
 
+### Checkpoint comments for debuggability
+
+- Before any major phase, SAP transaction, loop, or branching decision, add a checkpoint comment describing what is about to happen, for example:
+  - `## Header Details (Dates/Terms)`
+  - `## Apply provided characteristics to SAP table where names match.`
+- Use `#%region NAME` / `#%endregion` to bracket larger phases so they appear as clear sections in the execution log.
+- Remember that FRIDA echoes all comments and region markers into the log, e.g.:
+  - `3/3/2026 12:00:21 PM - ## Origin/Destination (write as provided; if Origin is empty, SAP may accept or validate) : Running`
+  - `3/3/2026 12:00:22 PM - #%region FAILURE HANDLING ──────────────────────────────────────────── : Running`
+- When designing scripts, think of these comments and regions as **checkpoints**: they should make both the script and the execution log easier to navigate when debugging.
+
 ## Variables
 
 **Global vs Local:**
