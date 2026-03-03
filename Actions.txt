@@ -6,14 +6,25 @@
 ########################################################################################################################
 
 #%region INPUTS & SETUP ──────────────────────────────────────────────────────
-## Expected GLOBAL variables (set in FRIDA Variables UI):
-## <<excelFile>>  -> full path to the Excel file
-## <<sapUser>>    -> SAP username
-## <<sapPass>>    -> SAP password
+## ─────────────────────────────────────────────────────────────────────────────
+## GLOBAL VARIABLES (define in Frida UI before execution)
+## ─────────────────────────────────────────────────────────────────────────────
+## <<sapUser>>           - SAP username
+## <<sapPass>>           - SAP password
+## <<SingleRowOverride>> - (optional) Row number(s) to process only; comma-separated e.g. "3,7,8"; enter NA to process all
+## ─────────────────────────────────────────────────────────────────────────────
 
 GetHome as "home"
 GetCurrentDate format={"yyyy-MM-dd_HH-mm-ss" en} and save as RunStamp
 DefineVariable as "runId" with the value "SAPBot_<<<RunStamp>>>"
+DefineVariable type "int" as "successCount" with the value "0"
+DefineVariable type "int" as "failCount" with the value "0"
+
+## ─────────────────────────────────────────────────────────────────────────────
+## CONFIGURABLE PLACEHOLDERS (edit these values as needed)
+## ─────────────────────────────────────────────────────────────────────────────
+DefineVariable as "excelFile" with the value "C:\Users\rodrigo.gracia\Documents\Projects\ECOM\Inputs\ECOM_MASIVO 9 FEBRERO 2026.xlsx"
+DefineVariable as "notifyEmail" with the value "PLACEHOLDER@email.com"
 
 ## Evidence folder (optional, for quick debugging / audit)
 DefineVariable as "evidenceDir" with the value "<<<home>>>Documents\Frida_SAP_Evidence"
@@ -26,7 +37,6 @@ end
 
 
 #%region LOAD EXCEL & VALIDATE TEMPLATE HEADERS ──────────────────────────────
-DefineVariable as "excelFile" with the value "C:\Users\rodrigo.gracia\Documents\Projects\ECOM\Inputs\ECOM_MASIVO 9 FEBRERO 2026.xlsx"
 Excel LoadWBook "<<<excelFile>>>" as WBName
 ##Excel LoadWBook "<<excelFile>>" as WBName
 Excel LoadWSheet WBName sheet "Template" as WSName
@@ -110,31 +120,50 @@ if ("<<<HeadersOk>>>" -ne "true")
 else
 	Message "TEMPLATE HEADER VALIDATION OK (47 columns)"
 end
+
+Excel Write "Status" in WSName row 1 and column 48
+Excel Write "Details" in WSName row 1 and column 49
 #%endregion
 
 
-#%region DETERMINE RESUME POINT (Processed → next Template row) ──────────────
-## The bot resumes based on how many entries exist in Processed column 1 (starting row 2).
-## This avoids counting the Processed header row.
+#%region DETERMINE ROW COUNT AND INITIALIZE LOOP ─────────────────────────────
+## Count total Template rows to process. Skipping already-processed rows is handled inside the loop.
 
 Excel ReadColumn from the worksheet {WSName} with the column index {1} start_at {2} and save its value as {TemplateColA} visible without nulls
 CountItems in TemplateColA and save_as TotalTemplateRows
 
-Excel ReadColumn from the worksheet {WSProcessed} with the column index {1} start_at {2} and save its value as {RowsProcessed} visible without nulls
-CountItems in RowsProcessed and save_as TotalRowsProcessed
-
-## Template data starts on row 2. If 0 processed, we start at row 2.
-MathOperation <<<TotalRowsProcessed>>> + 2 and save as Contador
-
-## Remaining items = TotalTemplateRows - TotalRowsProcessed
-MathOperation <<<TotalTemplateRows>>> - <<<TotalRowsProcessed>>> and save as Remaining
-
-Message "Resume: Processed=<<<TotalRowsProcessed>>> | Total=<<<TotalTemplateRows>>> | StartRow=<<<Contador>>> | Remaining=<<<Remaining>>>"
-
-if (<<<Remaining>>> <= 0)
+if (<<<TotalTemplateRows>>> <= 0)
 	Message "Nothing to process."
 	Excel Save WBName and close
 	Finish
+end
+
+## Build explicit list of row numbers to process (batch vs override)
+DefineVariable as "rowOverride" with the value "<<SingleRowOverride>>"
+DefineVariable as "isOverrideMode" with the value "false"
+DefineVariable type "List" as "RowsToProcess"
+
+## Override mode if user provided a value different from NA/empty
+if ("<<<rowOverride>>>" -ne "NA")
+	if ("<<<rowOverride>>>" -ne "")
+		DefineVariable as "isOverrideMode" with the value "true"
+	end
+end
+
+if ("<<<isOverrideMode>>>" -eq "true")
+	SplitIntoList the variable "rowOverride" every "," character and save as a list "RowsToProcess"
+	TrimList RowsToProcess
+	RemoveDuplicatesInList {RowsToProcess}
+	CountItems in RowsToProcess and save_as Remaining
+	Message "OVERRIDE MODE: Processing rows <<<rowOverride>>> (status check skipped)"
+else
+	DefineVariable type "int" as "r" with the value "2"
+	for <<<TotalTemplateRows>>> times {
+		AddVarToList "RowsToProcess" value "r"
+		r++
+	}
+	DefineVariable as "Remaining" with the value "<<<TotalTemplateRows>>>"
+	Message "Total Template rows: <<<TotalTemplateRows>>> | Starting at row 2"
 end
 #%endregion
 
@@ -151,7 +180,25 @@ end
 
 
 #%region PROCESS LOOP ────────────────────────────────────────────────────────
-for <<<Remaining>>> times {
+foreach rowNum in RowsToProcess {
+
+	DefineVariable type "int" as "Contador" with the value "<<<rowNum>>>"
+
+	#%region CHECK IF ROW SHOULD BE PROCESSED ───────────────────────────────
+	DefineVariable as "shouldProcessRow" with the value "true"
+	if ("<<<isOverrideMode>>>" -eq "false")
+		Excel ReadCellText from the worksheet {WSName} from the cell {<<<Contador>>>,48} and save its value as {rowStatus}
+		if ("<<<rowStatus>>>" -eq "Success")
+			DefineVariable as "shouldProcessRow" with the value "false"
+		end
+	end
+	#%endregion
+
+	if ("<<<shouldProcessRow>>>" -eq "true")
+	#%region MARK ROW AS PROCESSING ──────────────────────────────────────────
+	Excel Write "Processing" in WSName row <<<Contador>>> and column 48
+	Excel Save WBName
+	#%endregion
 
 	#%region READ CURRENT TEMPLATE ROW ───────────────────────────────────────
 	## Take one row from Template as the contract creation request.
@@ -224,6 +271,7 @@ for <<<Remaining>>> times {
 
 	#%region CREATE CONTRACT IN SAP ───────────────────────────────────────────
 	DefineVariable as "currentStep" with the value "Init"
+	DefineVariable as "lastSAPError" with the value ""
 
 	try
 		## Reset to transaction for each record so navigation is consistent
@@ -242,9 +290,27 @@ for <<<Remaining>>> times {
 		SAP WriteText ElementId wnd[0]/usr/ctxtP_ORG1 Text "<<<orgData>>>"
 		SAP WriteText ElementId wnd[0]/usr/ctxtP_PGRP1 Text "<<<purchasingGroup>>>"
 		SAP SendKey 0
-		SAP ReadStatus as statusMsg
-		if ("<<<statusMsg>>>" -like "*Error*")
-			Throw "<<<statusMsg>>>"
+		SAP GetStatusInfo as StatInfo
+		DefineVariable as "sapStatusMsg" with the value "<<<StatInfo[0]>>>"
+		DefineVariable as "sapStatusId" with the value "<<<StatInfo[1]>>>"
+		DefineVariable as "sapStatusType" with the value "<<<StatInfo[2]>>>"
+		if ("<<<sapStatusType>>>" -eq "E")
+			DefineVariable as "lastSAPError" with the value "SAP(<<<sapStatusType>>>) [<<<sapStatusId>>>]: <<<sapStatusMsg>>>"
+		end
+		if ("<<<sapStatusType>>>" -eq "A")
+			DefineVariable as "lastSAPError" with the value "SAP(<<<sapStatusType>>>) [<<<sapStatusId>>>]: <<<sapStatusMsg>>>"
+		end
+		if ("<<<sapStatusType>>>" -eq "X")
+			DefineVariable as "lastSAPError" with the value "SAP(<<<sapStatusType>>>) [<<<sapStatusId>>>]: <<<sapStatusMsg>>>"
+		end
+		if ("<<<sapStatusType>>>" -eq "S")
+			DefineVariable as "lastSAPError" with the value ""
+		end
+		if ("<<<sapStatusType>>>" -eq "I")
+			DefineVariable as "lastSAPError" with the value ""
+		end
+		if ("<<<sapStatusType>>>" -eq "W")
+			DefineVariable as "lastSAPError" with the value ""
 		end
 		SAP ClickButton id wnd[0]/tbar[1]/btn[8]
 		#%endregion
@@ -264,9 +330,27 @@ for <<<Remaining>>> times {
 		SAP WriteText ElementId wnd[0]/usr/subSUBSCREEN:ZACMRE_DEAL_CONTRACT:2200/txtSG_HEADER_DETAILS-MENGE Text "<<<quantity>>>"
 		SAP WriteText ElementId wnd[0]/usr/subSUBSCREEN:ZACMRE_DEAL_CONTRACT:2200/ctxtSG_HEADER_DETAILS-LIFNR Text "<<<bp>>>"
 		SAP SendKey 0
-		SAP ReadStatus as statusMsg
-		if ("<<<statusMsg>>>" -like "*Error*")
-			Throw "<<<statusMsg>>>"
+		SAP GetStatusInfo as StatInfo
+		DefineVariable as "sapStatusMsg" with the value "<<<StatInfo[0]>>>"
+		DefineVariable as "sapStatusId" with the value "<<<StatInfo[1]>>>"
+		DefineVariable as "sapStatusType" with the value "<<<StatInfo[2]>>>"
+		if ("<<<sapStatusType>>>" -eq "E")
+			DefineVariable as "lastSAPError" with the value "SAP(<<<sapStatusType>>>) [<<<sapStatusId>>>]: <<<sapStatusMsg>>>"
+		end
+		if ("<<<sapStatusType>>>" -eq "A")
+			DefineVariable as "lastSAPError" with the value "SAP(<<<sapStatusType>>>) [<<<sapStatusId>>>]: <<<sapStatusMsg>>>"
+		end
+		if ("<<<sapStatusType>>>" -eq "X")
+			DefineVariable as "lastSAPError" with the value "SAP(<<<sapStatusType>>>) [<<<sapStatusId>>>]: <<<sapStatusMsg>>>"
+		end
+		if ("<<<sapStatusType>>>" -eq "S")
+			DefineVariable as "lastSAPError" with the value ""
+		end
+		if ("<<<sapStatusType>>>" -eq "I")
+			DefineVariable as "lastSAPError" with the value ""
+		end
+		if ("<<<sapStatusType>>>" -eq "W")
+			DefineVariable as "lastSAPError" with the value ""
 		end
 
 		DefineVariable as "currentStep" with the value "Header Details (Dates/Terms)"
@@ -279,9 +363,27 @@ for <<<Remaining>>> times {
 		SAP WriteText ElementId wnd[0]/usr/subSUBSCREEN:ZACMRE_DEAL_CONTRACT:2200/ctxtSG_HEADER_DETAILS-CITY_ORIGIN Text "<<<origin>>>"
 		SAP WriteText ElementId wnd[0]/usr/subSUBSCREEN:ZACMRE_DEAL_CONTRACT:2200/ctxtSG_HEADER_DETAILS-CITY_DESTINATION Text "<<<destination>>>"
 		SAP SendKey 0
-		SAP ReadStatus as statusMsg
-		if ("<<<statusMsg>>>" -like "*Error*")
-			Throw "<<<statusMsg>>>"
+		SAP GetStatusInfo as StatInfo
+		DefineVariable as "sapStatusMsg" with the value "<<<StatInfo[0]>>>"
+		DefineVariable as "sapStatusId" with the value "<<<StatInfo[1]>>>"
+		DefineVariable as "sapStatusType" with the value "<<<StatInfo[2]>>>"
+		if ("<<<sapStatusType>>>" -eq "E")
+			DefineVariable as "lastSAPError" with the value "SAP(<<<sapStatusType>>>) [<<<sapStatusId>>>]: <<<sapStatusMsg>>>"
+		end
+		if ("<<<sapStatusType>>>" -eq "A")
+			DefineVariable as "lastSAPError" with the value "SAP(<<<sapStatusType>>>) [<<<sapStatusId>>>]: <<<sapStatusMsg>>>"
+		end
+		if ("<<<sapStatusType>>>" -eq "X")
+			DefineVariable as "lastSAPError" with the value "SAP(<<<sapStatusType>>>) [<<<sapStatusId>>>]: <<<sapStatusMsg>>>"
+		end
+		if ("<<<sapStatusType>>>" -eq "S")
+			DefineVariable as "lastSAPError" with the value ""
+		end
+		if ("<<<sapStatusType>>>" -eq "I")
+			DefineVariable as "lastSAPError" with the value ""
+		end
+		if ("<<<sapStatusType>>>" -eq "W")
+			DefineVariable as "lastSAPError" with the value ""
 		end
 		#%endregion
 
@@ -358,18 +460,54 @@ for <<<Remaining>>> times {
 
 		SAP WriteText ElementId wnd[0]/usr/subSS_HD_PRICE_DETAILS:ZACMRE_DEAL_CONTRACT:2800/txtSG_HEADER_PRICE_SC-FX Text "<<<fx>>>"
 		SAP SendKey 0
-		SAP ReadStatus as statusMsg
-		if ("<<<statusMsg>>>" -like "*Error*")
-			Throw "<<<statusMsg>>>"
+		SAP GetStatusInfo as StatInfo
+		DefineVariable as "sapStatusMsg" with the value "<<<StatInfo[0]>>>"
+		DefineVariable as "sapStatusId" with the value "<<<StatInfo[1]>>>"
+		DefineVariable as "sapStatusType" with the value "<<<StatInfo[2]>>>"
+		if ("<<<sapStatusType>>>" -eq "E")
+			DefineVariable as "lastSAPError" with the value "SAP(<<<sapStatusType>>>) [<<<sapStatusId>>>]: <<<sapStatusMsg>>>"
+		end
+		if ("<<<sapStatusType>>>" -eq "A")
+			DefineVariable as "lastSAPError" with the value "SAP(<<<sapStatusType>>>) [<<<sapStatusId>>>]: <<<sapStatusMsg>>>"
+		end
+		if ("<<<sapStatusType>>>" -eq "X")
+			DefineVariable as "lastSAPError" with the value "SAP(<<<sapStatusType>>>) [<<<sapStatusId>>>]: <<<sapStatusMsg>>>"
+		end
+		if ("<<<sapStatusType>>>" -eq "S")
+			DefineVariable as "lastSAPError" with the value ""
+		end
+		if ("<<<sapStatusType>>>" -eq "I")
+			DefineVariable as "lastSAPError" with the value ""
+		end
+		if ("<<<sapStatusType>>>" -eq "W")
+			DefineVariable as "lastSAPError" with the value ""
 		end
 
 		DefineVariable as "currentStep" with the value "Price Details (BID)"
 		SAP WriteText ElementId wnd[0]/usr/subSS_PRICE_DETAILS:ZACMRE_DEAL_CONTRACT:7000/txt<SG>-BID-BASE_PRICE_VAL Text "<<<bidPrice>>>"
 		SAP WriteText ElementId wnd[0]/usr/subSS_PRICE_DETAILS:ZACMRE_DEAL_CONTRACT:7000/txt<SG>-BID-CUPSCORE_VAL Text "<<<cupScorePremium>>>"
 		SAP SendKey 0
-		SAP ReadStatus as statusMsg
-		if ("<<<statusMsg>>>" -like "*Error*")
-			Throw "<<<statusMsg>>>"
+		SAP GetStatusInfo as StatInfo
+		DefineVariable as "sapStatusMsg" with the value "<<<StatInfo[0]>>>"
+		DefineVariable as "sapStatusId" with the value "<<<StatInfo[1]>>>"
+		DefineVariable as "sapStatusType" with the value "<<<StatInfo[2]>>>"
+		if ("<<<sapStatusType>>>" -eq "E")
+			DefineVariable as "lastSAPError" with the value "SAP(<<<sapStatusType>>>) [<<<sapStatusId>>>]: <<<sapStatusMsg>>>"
+		end
+		if ("<<<sapStatusType>>>" -eq "A")
+			DefineVariable as "lastSAPError" with the value "SAP(<<<sapStatusType>>>) [<<<sapStatusId>>>]: <<<sapStatusMsg>>>"
+		end
+		if ("<<<sapStatusType>>>" -eq "X")
+			DefineVariable as "lastSAPError" with the value "SAP(<<<sapStatusType>>>) [<<<sapStatusId>>>]: <<<sapStatusMsg>>>"
+		end
+		if ("<<<sapStatusType>>>" -eq "S")
+			DefineVariable as "lastSAPError" with the value ""
+		end
+		if ("<<<sapStatusType>>>" -eq "I")
+			DefineVariable as "lastSAPError" with the value ""
+		end
+		if ("<<<sapStatusType>>>" -eq "W")
+			DefineVariable as "lastSAPError" with the value ""
 		end
 
 		SAP ClickButton id wnd[0]/tbar[1]/btn[8]
@@ -434,8 +572,11 @@ for <<<Remaining>>> times {
 		#%endregion
 
 
-		#%region MARK SUCCESS IN EXCEL (Processed) ─────────────────────────────
-		## Log the Template row number so the bot can resume deterministically.
+		#%region MARK SUCCESS IN EXCEL ───────────────────────────────────────────
+		Excel Write "Success" in WSName row <<<Contador>>> and column 48
+		successCount++
+
+		## Audit log in Processed sheet
 		GetCurrentDate format={"MM/dd/yyyy HH:mm:ss" en} and save as NowHuman
 		Excel Append from WSProcessed at [1 ="<<<Contador>>>",2 ="SUCCESS",3 ="<<<NowHuman>>>",4 ="<<<runId>>>"]
 		Excel Save WBName
@@ -443,16 +584,28 @@ for <<<Remaining>>> times {
 
 	catch as ex
 		#%region FAILURE HANDLING ────────────────────────────────────────────
+		## Determine error detail: prefer SAP root cause if available, otherwise use exception
+		if ("<<<lastSAPError>>>" -ne "")
+			DefineVariable as "errorDetail" with the value "<<<currentStep>>>: <<<lastSAPError>>>"
+		else
+			DefineVariable as "errorDetail" with the value "<<<currentStep>>>: <<<ex>>>"
+		end
+
 		## Preserve evidence and mark the row as failed so it can be reviewed or retried intentionally.
 		Titanium CaptureImage and save as <<<evidenceDir>>>\SAP_Fail_Row<<<Contador>>>_<<<runId>>>.png
 
+		Excel Write "Failed" in WSName row <<<Contador>>> and column 48
+		Excel Write "<<<errorDetail>>>" in WSName row <<<Contador>>> and column 49
+		failCount++
+
+		## Audit log in Processed sheet
 		GetCurrentDate format={"MM/dd/yyyy HH:mm:ss" en} and save as NowHuman
-		Excel Append from WSProcessed at [1 ="<<<Contador>>>",2 ="FAIL",3 ="<<<NowHuman>>>",4 ="<<<runId>>>",5 ="<<<currentStep>>>: <<<ex>>>"]
+		Excel Append from WSProcessed at [1 ="<<<Contador>>>",2 ="FAIL",3 ="<<<NowHuman>>>",4 ="<<<runId>>>",5 ="<<<errorDetail>>>"]
 		Excel Save WBName
 
 		## Reset transaction state before next row
 		try
-			SAP SendKey F12
+			SAP CloseTrans
 		catch
 			## Ignore - StartTransaction will reset anyway
 		end
@@ -461,16 +614,19 @@ for <<<Remaining>>> times {
 		#%endregion
 	end
 	#%endregion
-
-
-	#%region ADVANCE TO NEXT ROW ──────────────────────────────────────────────
-	Contador++
-	#%endregion
+	end
 }
 #%endregion
 
 
 #%region CLEANUP ─────────────────────────────────────────────────────────────
+## Send summary email
+if (<<<failCount>>> -gt 0)
+	SendMail with subject "SAP Bot <<<runId>>> - Completed with failures" to "<<<notifyEmail>>>" with body "Run <<<runId>>> finished. <<<successCount>>> contracts succeeded, <<<failCount>>> failed. Check Template sheet Status and Details columns for specifics."
+else
+	SendMail with subject "SAP Bot <<<runId>>> - All contracts created" to "<<<notifyEmail>>>" with body "Run <<<runId>>> finished successfully. <<<successCount>>> contracts created with no errors."
+end
+
 Excel Save WBName and close
 SystemNotify Type "Notification" with message "SAP bot finished run: <<<runId>>>"
 #%endregion

@@ -84,6 +84,22 @@ DefineVariable type "Date" as "myDate" with the value "2024-01-15"
 <<<MyList[-1]>>>
 ```
 
+**Global Variables - UI Definition and "NA" Convention:**
+
+Since all globals (`<<Var>>`) must be defined in Frida's UI Variables panel before use, if a global is undefined its placeholder appears literally (e.g. `<<VarName>>` in logs), and empty-check logic fails. For optional/empty values, `NA` is treated as "empty"; comparisons must use e.g. `if ("<<<singleRow>>>" -ne "NA")`.
+
+At the top of the script, document all global variables so the user knows which ones to define in the UI:
+
+```
+## ─────────────────────────────────────────────────────────────────────────────
+## GLOBAL VARIABLES (define in Frida UI before execution)
+## ─────────────────────────────────────────────────────────────────────────────
+## <<sapUser>>           - SAP username
+## <<sapPass>>           - SAP password
+## <<SingleRowOverride>> - (optional) Process only this row number; enter NA to process all
+## ─────────────────────────────────────────────────────────────────────────────
+```
+
 ## Comparisons
 
 **Boolean outputs are strings** - most functions like `ElementExists` return `"true"` or `"false"` as strings.
@@ -106,7 +122,7 @@ end
 
 ```
 ## Correct
-while ("<<<continue>>>" -eq "true") {
+while ("<<<keepGoing>>>" -eq "true") {
     if ("<<<condition1>>>" -eq "true")
         if ("<<<condition2>>>" -eq "false")
             break
@@ -117,6 +133,34 @@ while ("<<<continue>>>" -eq "true") {
 ## Wrong - compound logic in while
 while ("<<<a>>>" -eq "true" -AND "<<<b>>>" -eq "false") {
     ## will fail
+}
+```
+
+**Loop control - FRIDA only has `break`, NOT `continue`:**
+
+- `break` exits the loop entirely - this works
+- `continue` (skip to next iteration) **DOES NOT EXIST** in FRIDA
+
+To skip an iteration, use a flag variable and wrap the remaining loop body:
+
+```
+## Wrong - continue doesn't exist
+foreach item in myList {
+    if ("<<<shouldSkip>>>" -eq "true")
+        continue
+    end
+    ## rest of processing
+}
+
+## Correct - use flag + conditional wrapper
+foreach item in myList {
+    DefineVariable as "shouldProcess" with the value "true"
+    if ("<<<shouldSkip>>>" -eq "true")
+        DefineVariable as "shouldProcess" with the value "false"
+    end
+    if ("<<<shouldProcess>>>" -eq "true")
+        ## rest of processing
+    end
 }
 ```
 

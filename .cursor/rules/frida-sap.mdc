@@ -142,9 +142,11 @@ catch as ex
 end
 ```
 
-## Transaction Recovery (Experimental)
+## Transaction Recovery
 
-When a row fails mid-transaction, reset SAP state before the next row:
+When a row fails mid-transaction, reset SAP state before the next row.
+
+**Important:** `SendKey 12` (or `SendKey F12`) does NOT work reliably for cancelling transactions. Use `SAP CloseTrans` instead, which is the dedicated function for closing/cancelling the current transaction.
 
 ```
 catch as ex
@@ -152,9 +154,9 @@ catch as ex
     Excel Append from WSProcessed at [1 ="<<<rowNum>>>", 2 ="FAIL", 3 ="<<<currentStep>>>: <<<ex>>>"]
     Excel Save WB
 
-    ## Reset transaction state
+    ## Reset transaction state - use CloseTrans, NOT SendKey
     try
-        SAP SendKey F12
+        SAP CloseTrans
     catch
         ## Ignore - StartTransaction will reset anyway
     end
