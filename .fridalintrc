@@ -1,0 +1,11 @@
+{
+  "indent": "tab",
+  "indent_size": 1,
+  "select": ["ALL"],
+  "ignore": ["W002", "C005"],
+  "fixable": ["ALL"],
+  "unfixable": [],
+  "per-file-ignores": {
+    "CheckSAPStatus.txt": ["W006"]
+  }
+}

@@ -50,11 +50,15 @@ Excel Close WB
 When scripts depend on specific columns, validate headers before processing:
 
 ```
-Excel ReadCell from the worksheet WS from the cell {1,1} and save its value as {header1}
+Excel ReadCellText from the worksheet {WS} from the cell {1,1} and save its value as {header1}
 if ("<<<header1>>>" -ne "Expected Header")
     Finish "Template mismatch: expected 'Expected Header' in A1"
 end
 ```
+
+## ReadCellText as Standard
+
+Use `ReadCellText` as the default for reading cell values. `ReadCell` returns the raw value (e.g. Excel serial number for dates); `ReadCellText` returns the display-formatted text (e.g. `03/15/2026`), preserving the number format. Always use `ReadCellText`; if `ReadCell` is used, add a `#?` comment justifying why. Syntax: `ReadCellText` requires braces around the worksheet key, e.g. `Excel ReadCellText from the worksheet {WSName} from the cell {row,col} and save its value as {varName}`.
 
 ## Resume Strategy
 

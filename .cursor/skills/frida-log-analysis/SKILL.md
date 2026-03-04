@@ -35,6 +35,7 @@ Use this skill whenever:
        - **Cascade** (downstream consequence of an earlier failure).
        - **Ambiguous** (log alone does not fully explain cause).
    - Look at nearby comments and regions (`##`, `#%region`, `#%endregion`) to understand where in the script the error occurred.
+   - When cross-referencing errors against the main script, check for `RunScript` calls near the failing line; if the error originates from a sub-script, read that sub-script file as well for context.
 
 3. **Check for known patterns**
    - Before forming conclusions, consult `references/frida-log-learnings.md`:
@@ -66,8 +67,9 @@ You can follow this workflow when asking Cursor to debug a FRIDA run:
    - Run `get_latest_frida_log.ps1` and retrieve the latest log tail and path.
    - Apply `frida-log-navigation.md` to classify errors and understand context.
    - Consult `frida-log-learnings.md` to reuse any known patterns.
-3. If the agent finds only obvious or clearly cascading errors, it explains them directly; otherwise it invokes the `frida-log-debugger` subagent for a deep dive.
-4. The subagent reads targeted slices of the log (and `Actions.txt` if needed), then returns a structured report with root causes, cascades, ambiguous areas, and recommendations.
+   - **Cross-check errors against the main FRIDA script** ( `Actions.txt`) to understand what the script was trying to do at the failing step and to identify script-side causes (invalid assumptions, missing guards, etc.).
+3. If the agent finds only obvious or clearly cascading errors, it explains them directly, always referencing the relevant section of `Actions.txt` (or the current scriptPath) in the explanation; otherwise it invokes the `frida-log-debugger` subagent for a deep dive.
+4. The subagent reads targeted slices of the log and the FRIDA script (`Actions.txt` or the provided scriptPath), then returns a structured report with root causes, cascades, ambiguous areas, and recommendations.
 5. You verify the report against SAP/Excel/data, then tell the agent what you found; the agent adds new confirmed patterns to `frida-log-learnings.md` so similar issues are recognized faster in the future.
 
 ### Files this skill relies on

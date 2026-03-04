@@ -1,0 +1,37 @@
+{
+  "version": "2.0.0",
+  "tasks": [
+    {
+      "label": "frida-lint: check",
+      "type": "shell",
+      "command": "python",
+      "args": ["tools/frida_lint.py", "check", "${file}"],
+      "group": "none",
+      "presentation": { "reveal": "silent", "panel": "shared" }
+    },
+    {
+      "label": "frida-lint: fix",
+      "type": "shell",
+      "command": "python",
+      "args": ["tools/frida_lint.py", "check", "${file}", "--fix"],
+      "group": "none",
+      "presentation": { "reveal": "silent", "panel": "shared" }
+    },
+    {
+      "label": "frida-lint: format",
+      "type": "shell",
+      "command": "python",
+      "args": ["tools/frida_lint.py", "format", "${file}"],
+      "group": "none",
+      "presentation": { "reveal": "silent", "panel": "shared" }
+    },
+    {
+      "label": "frida-lint: diff",
+      "type": "shell",
+      "command": "python",
+      "args": ["tools/frida_lint.py", "format", "${file}", "--diff"],
+      "group": "none",
+      "presentation": { "reveal": "always", "panel": "shared" }
+    }
+  ]
+}

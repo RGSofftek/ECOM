@@ -4,11 +4,25 @@
 ## - Create Deal Contracts in SAP (ZWB21) with header data, characteristics, texts, and price/rules
 ## - Log each processed Template row into "Processed" so the bot can resume safely
 ########################################################################################################################
+## ──────────────────────────────────────────────────────────────────────
+## SAP NAVIGATION MAP (ZWB21 - Deal Contract Creation)
+## ──────────────────────────────────────────────────────────────────────
+## Screen flow:
+##   Entry Screen (type + org) -> btn[8] Execute
+##   -> Header Details (basic + dates/terms) -> SendKey 0 validates
+##   -> btn[7] opens Characteristics sub-screen -> btn[3] returns
+##   -> Price Details (header + BID) -> btn[8] next section
+##     -> btnBUTTON_1 confirmation dialog
+##   -> Texts tab (tree: 0001=General, Z043=FLO ID, Z009=Price, Z048=AddCond)
+##   -> Rules tab (AOHD) combo boxes + radio buttons
+##   -> btn[11] Save -> btn[15] Confirm/Finalize
+## ──────────────────────────────────────────────────────────────────────
 
-#%region INPUTS & SETUP ──────────────────────────────────────────────────────
+#%region INPUTS & SETUP ────────────────────────────────────────────────────── ──────────────────────────────────────────────────────
 ## ─────────────────────────────────────────────────────────────────────────────
 ## GLOBAL VARIABLES (define in Frida UI before execution)
 ## ─────────────────────────────────────────────────────────────────────────────
+## <<excelFile>>         - Path to Excel workbook (Template + Processed sheets)
 ## <<sapUser>>           - SAP username
 ## <<sapPass>>           - SAP password
 ## <<SingleRowOverride>> - (optional) Row number(s) to process only; comma-separated e.g. "3,7,8"; enter NA to process all
@@ -27,11 +41,14 @@ DefineVariable as "notifyEmail" with the value "rodrigo.gracia@softtek.com"
 
 ## Evidence folder (optional, for quick debugging / audit)
 DefineVariable as "evidenceDir" with the value "<<<home>>>Documents\Frida_SAP_Evidence"
+#? Assumption: CheckIfDirExist throws when the directory is missing; catch then creates it. Other failures (e.g. path invalid) also create the folder.
 try
 	File CheckIfDirExist in the path "<<<home>>>Documents" with the name "Frida_SAP_Evidence"
 catch
 	File NewFolder in "<<<home>>>Documents" with the name "Frida_SAP_Evidence"
 end
+DefineVariable as "runEvidenceDir" with the value "<<<evidenceDir>>>\<<<runId>>>"
+File NewFolder in "<<<evidenceDir>>>" with the name "<<<runId>>>"
 #%endregion
 
 
@@ -157,7 +174,6 @@ if ("<<<isOverrideMode>>>" -eq "true")
 	SplitIntoList the variable "rowOverride" every "," character and save as a list "RowsToProcess"
 	TrimList RowsToProcess
 	RemoveDuplicatesInList {RowsToProcess}
-	CountItems in RowsToProcess and save_as Remaining
 	Message "OVERRIDE MODE: Processing rows <<<rowOverride>>> (status check skipped)"
 else
 	DefineVariable type "int" as "r" with the value "2"
@@ -165,7 +181,6 @@ else
 		AddVarToList "RowsToProcess" value "r"
 		r++
 	}
-	DefineVariable as "Remaining" with the value "<<<TotalTemplateRows>>>"
 	Message "Total Template rows: <<<TotalTemplateRows>>> | Starting at row 2"
 end
 #%endregion
@@ -176,6 +191,8 @@ end
 try
 	SAP RunSapInstance "AMCO ECC - QE0 Quality" 060 <<sapUser>> <<sapPass>> EN graphic
 catch as ex
+	DefineVariable as "htmlBody" with the value "<html><body><h2>SAP Bot - <<<runId>>></h2><p>SAP login failed.</p><p><<<ex>>></p></body></html>"
+	SendMail with subject "SAP Bot <<<runId>>> - Login Failed" to "<<<notifyEmail>>>" with htmlbody "<<<htmlBody>>>"
 	Excel Save WBName and close
 	Finish "SAP login failed - cannot continue: <<<ex>>>"
 end
@@ -183,14 +200,14 @@ end
 
 
 #%region PROCESS LOOP ────────────────────────────────────────────────────────
+DefineVariable as "htmlFailRows" with the value ""
+DefineVariable as "successRowNums" with the value ""
 foreach rowNum in RowsToProcess {
-
-	DefineVariable type "int" as "Contador" with the value "<<<rowNum>>>"
 
 	#%region CHECK IF ROW SHOULD BE PROCESSED ───────────────────────────────
 	DefineVariable as "shouldProcessRow" with the value "true"
 	if ("<<<isOverrideMode>>>" -eq "false")
-		Excel ReadCellText from the worksheet {WSName} from the cell {<<<Contador>>>,<<<statusCol>>>} and save its value as {rowStatus}
+		Excel ReadCellText from the worksheet {WSName} from the cell {<<<rowNum>>>,<<<statusCol>>>} and save its value as {rowStatus}
 		if ("<<<rowStatus>>>" -eq "Success")
 			DefineVariable as "shouldProcessRow" with the value "false"
 		end
@@ -198,425 +215,502 @@ foreach rowNum in RowsToProcess {
 	#%endregion
 
 	if ("<<<shouldProcessRow>>>" -eq "true")
-	#%region MARK ROW AS PROCESSING ──────────────────────────────────────────
-	Excel Write "Processing" in WSName row <<<Contador>>> and column <<<statusCol>>>
-	Excel Save WBName
-	#%endregion
-
-	#%region READ CURRENT TEMPLATE ROW ───────────────────────────────────────
-	## Take one row from Template as the contract creation request.
-
-	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,1} and save its value as {contractType}
-	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,2} and save its value as {orgData}
-	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,3} and save its value as {purchasingGroup}
-	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,4} and save its value as {priceType}
-	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,5} and save its value as {contractDate}
-	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,6} and save its value as {plant}
-	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,7} and save its value as {material}
-	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,8} and save its value as {quantity}
-	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,9} and save its value as {deliveryPeriodFrom}
-	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,10} and save its value as {deliveryPeriodTo}
-	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,11} and save its value as {bp}
-	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,12} and save its value as {paymentTerms}
-	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,13} and save its value as {incoterms}
-	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,14} and save its value as {currency}
-	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,15} and save its value as {origin}
-	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,16} and save its value as {destination}
-
-	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,17} and save its value as {characteristicsCertifications}
-	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,18} and save its value as {characteristicsCropYear}
-	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,19} and save its value as {characteristicsYieldFactor}
-	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,20} and save its value as {characteristicsProcess}
-	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,21} and save its value as {characteristicsRegion}
-	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,22} and save its value as {characteristicsBagCapacity}
-	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,23} and save its value as {characteristicsFaults}
-	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,24} and save its value as {characteristicsScreenAndPreparation}
-	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,25} and save its value as {characteristicsCustomerProfile}
-	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,26} and save its value as {characteristicsTypeCoffee}
-
-	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,27} and save its value as {textGeneralRemarks}
-	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,28} and save its value as {textProducerFloId}
-	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,29} and save its value as {textPrice}
-	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,30} and save its value as {textAdditionalCondition}
-
-	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,31} and save its value as {precio}
-	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,32} and save its value as {marketPrice}
-	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,33} and save its value as {coverMonth}
-	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,34} and save its value as {fx}
-	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,35} and save its value as {otPercent}
-	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,36} and save its value as {bidPrice}
-	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,37} and save its value as {cupScorePremium}
-
-	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,38} and save its value as {rulesCoPurchaseAdvances}
-	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,39} and save its value as {rulesCoPurchaseWeightBasis}
-	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,40} and save its value as {rulesCoPurchaseReimbursTerms}
-	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,41} and save its value as {rulesCoPurchaseRules}
-	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,42} and save its value as {rulesCoPurchaseArbitration}
-	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,43} and save its value as {rulesCoPurchaseInsurance}
-	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,44} and save its value as {rulesCoPurchaseAdditionalConditions}
-	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,45} and save its value as {rulesCoPurchaseApprovalConditions}
-	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,46} and save its value as {rulesCoPurchaseStuffing}
-	Excel ReadCell from the worksheet WSName from the cell {<<<Contador>>>,47} and save its value as {rulesContractFormFixation}
-
-	## Build characteristics payload for SAP mapping (store values, not variable names)
-	DefineVariable type "List" as "characteristics"
-	AddValueToList "characteristics" value "Certifications,<<<characteristicsCertifications>>>"
-	AddValueToList "characteristics" value "Crop year,<<<characteristicsCropYear>>>"
-	AddValueToList "characteristics" value "Yield Factor,<<<characteristicsYieldFactor>>>"
-	AddValueToList "characteristics" value "Process,<<<characteristicsProcess>>>"
-	AddValueToList "characteristics" value "Region,<<<characteristicsRegion>>>"
-	AddValueToList "characteristics" value "Bag Capacity,<<<characteristicsBagCapacity>>>"
-	AddValueToList "characteristics" value "Faults Green Coffee,<<<characteristicsFaults>>>"
-	AddValueToList "characteristics" value "Screen and Preparation,<<<characteristicsScreenAndPreparation>>>"
-	AddValueToList "characteristics" value "Type of Coffee,<<<characteristicsTypeCoffee>>>"
-	#%endregion
-
-
-	#%region CREATE CONTRACT IN SAP ───────────────────────────────────────────
-	DefineVariable as "currentStep" with the value "Init"
-	DefineVariable as "lastSAPError" with the value ""
-
-	try
-		## Reset to transaction for each record so navigation is consistent
-		DefineVariable as "currentStep" with the value "Start Transaction"
-		SAP StartTransaction zwb21
-
-		#%region Entry Screen (type + org) ───────────────────────────────────
-		DefineVariable as "currentStep" with the value "Entry Screen"
-		## Contract Type (robust check: starts with P or equals YP01)
-		if (("<<<contractType>>>" -like "P*") -OR ("<<<contractType>>>" -eq "YP01"))
-			SAP SelectComboBox id wnd[0]/usr/cmbP_LSCTP1 P
-		else
-			SAP SelectComboBox id wnd[0]/usr/cmbP_LSCTP1 S
-		end
-
-		SAP WriteText ElementId wnd[0]/usr/ctxtP_ORG1 Text "<<<orgData>>>"
-		SAP WriteText ElementId wnd[0]/usr/ctxtP_PGRP1 Text "<<<purchasingGroup>>>"
-		SAP SendKey 0
-		SAP GetStatusInfo as StatInfo
-		DefineVariable as "sapStatusMsg" with the value "<<<StatInfo[0]>>>"
-		DefineVariable as "sapStatusId" with the value "<<<StatInfo[1]>>>"
-		DefineVariable as "sapStatusType" with the value "<<<StatInfo[2]>>>"
-		if ("<<<sapStatusType>>>" -eq "E")
-			DefineVariable as "lastSAPError" with the value "SAP(<<<sapStatusType>>>) [<<<sapStatusId>>>]: <<<sapStatusMsg>>>"
-		end
-		if ("<<<sapStatusType>>>" -eq "A")
-			DefineVariable as "lastSAPError" with the value "SAP(<<<sapStatusType>>>) [<<<sapStatusId>>>]: <<<sapStatusMsg>>>"
-		end
-		if ("<<<sapStatusType>>>" -eq "X")
-			DefineVariable as "lastSAPError" with the value "SAP(<<<sapStatusType>>>) [<<<sapStatusId>>>]: <<<sapStatusMsg>>>"
-		end
-		if ("<<<sapStatusType>>>" -eq "S")
-			DefineVariable as "lastSAPError" with the value ""
-		end
-		if ("<<<sapStatusType>>>" -eq "I")
-			DefineVariable as "lastSAPError" with the value ""
-		end
-		if ("<<<sapStatusType>>>" -eq "W")
-			DefineVariable as "lastSAPError" with the value ""
-		end
-		SAP ClickButton id wnd[0]/tbar[1]/btn[8]
+		DefineVariable as "rowOutcome" with the value "pending"
+		DefineVariable as "errorDetail" with the value ""
+		#%region MARK ROW AS PROCESSING ──────────────────────────────────────────
+		Excel Write "Processing" in WSName row <<<rowNum>>> and column <<<statusCol>>>
+		Excel Save WBName
 		#%endregion
 
+		#%region READ CURRENT TEMPLATE ROW ───────────────────────────────────────
+		## Take one row from Template as the contract creation request.
+		## Column mapping: 1=ContractType, 2=Org.Data, 3=PurchasingGroup, 4=PriceType, 5=ContractDate, 6=Plant, 7=Material, 8=Quantity, 9-10=DeliveryPeriod, 11=BP, 12=PaymentTerms, 13=Incoterms, 14=Currency, 15-16=Origin/Destination, 17-26=Characteristics, 27-30=Texts, 31-37=Price fields, 38-47=Rules.
 
-		#%region Header Details ──────────────────────────────────────────────
-		DefineVariable as "currentStep" with the value "Header Details (Basic)"
+		Excel ReadCell from the worksheet WSName from the cell {<<<rowNum>>>,1} and save its value as {contractType}
+		Excel ReadCell from the worksheet WSName from the cell {<<<rowNum>>>,2} and save its value as {orgData}
+		Excel ReadCell from the worksheet WSName from the cell {<<<rowNum>>>,3} and save its value as {purchasingGroup}
+		Excel ReadCell from the worksheet WSName from the cell {<<<rowNum>>>,4} and save its value as {priceType}
+		Excel ReadCellText from the worksheet {WSName} from the cell {<<<rowNum>>>,5} and save its value as {contractDate}
+		Excel ReadCell from the worksheet WSName from the cell {<<<rowNum>>>,6} and save its value as {plant}
+		Excel ReadCell from the worksheet WSName from the cell {<<<rowNum>>>,7} and save its value as {material}
+		Excel ReadCell from the worksheet WSName from the cell {<<<rowNum>>>,8} and save its value as {quantity}
+		Excel ReadCellText from the worksheet {WSName} from the cell {<<<rowNum>>>,9} and save its value as {deliveryPeriodFrom}
+		Excel ReadCellText from the worksheet {WSName} from the cell {<<<rowNum>>>,10} and save its value as {deliveryPeriodTo}
+		Excel ReadCell from the worksheet WSName from the cell {<<<rowNum>>>,11} and save its value as {bp}
+		Excel ReadCell from the worksheet WSName from the cell {<<<rowNum>>>,12} and save its value as {paymentTerms}
+		Excel ReadCell from the worksheet WSName from the cell {<<<rowNum>>>,13} and save its value as {incoterms}
+		#? UNUSED - clarification needed on whether this should be written to SAP
+		Excel ReadCell from the worksheet WSName from the cell {<<<rowNum>>>,14} and save its value as {currency}
+		Excel ReadCell from the worksheet WSName from the cell {<<<rowNum>>>,15} and save its value as {origin}
+		Excel ReadCell from the worksheet WSName from the cell {<<<rowNum>>>,16} and save its value as {destination}
+
+		Excel ReadCell from the worksheet WSName from the cell {<<<rowNum>>>,17} and save its value as {characteristicsCertifications}
+		Excel ReadCell from the worksheet WSName from the cell {<<<rowNum>>>,18} and save its value as {characteristicsCropYear}
+		Excel ReadCell from the worksheet WSName from the cell {<<<rowNum>>>,19} and save its value as {characteristicsYieldFactor}
+		Excel ReadCell from the worksheet WSName from the cell {<<<rowNum>>>,20} and save its value as {characteristicsProcess}
+		Excel ReadCell from the worksheet WSName from the cell {<<<rowNum>>>,21} and save its value as {characteristicsRegion}
+		Excel ReadCell from the worksheet WSName from the cell {<<<rowNum>>>,22} and save its value as {characteristicsBagCapacity}
+		Excel ReadCell from the worksheet WSName from the cell {<<<rowNum>>>,23} and save its value as {characteristicsFaults}
+		Excel ReadCell from the worksheet WSName from the cell {<<<rowNum>>>,24} and save its value as {characteristicsScreenAndPreparation}
+		Excel ReadCell from the worksheet WSName from the cell {<<<rowNum>>>,25} and save its value as {characteristicsCustomerProfile}
+		Excel ReadCell from the worksheet WSName from the cell {<<<rowNum>>>,26} and save its value as {characteristicsTypeCoffee}
+
+		Excel ReadCell from the worksheet WSName from the cell {<<<rowNum>>>,27} and save its value as {textGeneralRemarks}
+		Excel ReadCell from the worksheet WSName from the cell {<<<rowNum>>>,28} and save its value as {textProducerFloId}
+		Excel ReadCell from the worksheet WSName from the cell {<<<rowNum>>>,29} and save its value as {textPrice}
+		Excel ReadCell from the worksheet WSName from the cell {<<<rowNum>>>,30} and save its value as {textAdditionalCondition}
+
+		#? UNUSED - clarification needed
+		Excel ReadCell from the worksheet WSName from the cell {<<<rowNum>>>,31} and save its value as {precio}
+		Excel ReadCell from the worksheet WSName from the cell {<<<rowNum>>>,32} and save its value as {marketPrice}
+		Excel ReadCellText from the worksheet {WSName} from the cell {<<<rowNum>>>,33} and save its value as {coverMonth}
+		Excel ReadCell from the worksheet WSName from the cell {<<<rowNum>>>,34} and save its value as {fx}
+		#? UNUSED - clarification needed
+		Excel ReadCell from the worksheet WSName from the cell {<<<rowNum>>>,35} and save its value as {otPercent}
+		Excel ReadCell from the worksheet WSName from the cell {<<<rowNum>>>,36} and save its value as {bidPrice}
+		Excel ReadCell from the worksheet WSName from the cell {<<<rowNum>>>,37} and save its value as {cupScorePremium}
+
+		Excel ReadCell from the worksheet WSName from the cell {<<<rowNum>>>,38} and save its value as {rulesCoPurchaseAdvances}
+		Excel ReadCell from the worksheet WSName from the cell {<<<rowNum>>>,39} and save its value as {rulesCoPurchaseWeightBasis}
+		Excel ReadCell from the worksheet WSName from the cell {<<<rowNum>>>,40} and save its value as {rulesCoPurchaseReimbursTerms}
+		Excel ReadCell from the worksheet WSName from the cell {<<<rowNum>>>,41} and save its value as {rulesCoPurchaseRules}
+		Excel ReadCell from the worksheet WSName from the cell {<<<rowNum>>>,42} and save its value as {rulesCoPurchaseArbitration}
+		Excel ReadCell from the worksheet WSName from the cell {<<<rowNum>>>,43} and save its value as {rulesCoPurchaseInsurance}
+		Excel ReadCell from the worksheet WSName from the cell {<<<rowNum>>>,44} and save its value as {rulesCoPurchaseAdditionalConditions}
+		Excel ReadCell from the worksheet WSName from the cell {<<<rowNum>>>,45} and save its value as {rulesCoPurchaseApprovalConditions}
+		Excel ReadCell from the worksheet WSName from the cell {<<<rowNum>>>,46} and save its value as {rulesCoPurchaseStuffing}
+		Excel ReadCell from the worksheet WSName from the cell {<<<rowNum>>>,47} and save its value as {rulesContractFormFixation}
+
+		## Build characteristics payload for SAP mapping
+		DefineVariable type "List" as "characteristics"
+		AddValueToList "characteristics" value "Certifications,<<<characteristicsCertifications>>>"
+		AddValueToList "characteristics" value "Crop year,<<<characteristicsCropYear>>>"
+		AddValueToList "characteristics" value "Yield Factor,<<<characteristicsYieldFactor>>>"
+		AddValueToList "characteristics" value "Process,<<<characteristicsProcess>>>"
+		AddValueToList "characteristics" value "Region,<<<characteristicsRegion>>>"
+		AddValueToList "characteristics" value "Bag Capacity,<<<characteristicsBagCapacity>>>"
+		AddValueToList "characteristics" value "Faults Green Coffee,<<<characteristicsFaults>>>"
+		AddValueToList "characteristics" value "Screen and Preparation,<<<characteristicsScreenAndPreparation>>>"
+		## AddValueToList "characteristics" value "Customer Profile,<<<characteristicsCustomerProfile>>>"
+		AddValueToList "characteristics" value "Type of Coffee,<<<characteristicsTypeCoffee>>>"
+		#%endregion
+
+		#%region MANDATORY FIELD VALIDATION ────────────────────────────────────────
+		DefineVariable type "List" as "mandatoryChecks"
+		AddValueToList "mandatoryChecks" value "ContractType,<<<contractType>>>"
+		AddValueToList "mandatoryChecks" value "OrgData,<<<orgData>>>"
+		AddValueToList "mandatoryChecks" value "PurchasingGroup,<<<purchasingGroup>>>"
+		AddValueToList "mandatoryChecks" value "PriceType,<<<priceType>>>"
+		AddValueToList "mandatoryChecks" value "Quantity,<<<quantity>>>"
+		AddValueToList "mandatoryChecks" value "DeliveryPeriodFrom,<<<deliveryPeriodFrom>>>"
+		AddValueToList "mandatoryChecks" value "DeliveryPeriodTo,<<<deliveryPeriodTo>>>"
+		AddValueToList "mandatoryChecks" value "BidPrice,<<<bidPrice>>>"
+		AddValueToList "mandatoryChecks" value "ContractDate,<<<contractDate>>>"
+		AddValueToList "mandatoryChecks" value "Plant,<<<plant>>>"
+		AddValueToList "mandatoryChecks" value "Material,<<<material>>>"
+		AddValueToList "mandatoryChecks" value "BP,<<<bp>>>"
+		DefineVariable as "missingFields" with the value ""
+		foreach check in mandatoryChecks {
+			ApplyRegex ".+?(?=,)" to the string "<<<check>>>" and save as "fieldName"
+			ApplyRegex "(?<=,).*$" to the string "<<<check>>>" and save as "fieldValue"
+			if ("<<<fieldValue>>>" -eq "")
+				DefineVariable as "missingFields" with the value "<<<missingFields>>> <<<fieldName>>>,"
+			end
+		}
+		if ("<<<missingFields>>>" -ne "")
+			DefineVariable as "rowOutcome" with the value "validation_fail"
+			DefineVariable as "errorDetail" with the value "Missing mandatory fields: <<<missingFields>>>"
+		end
+		if ("<<<rowOutcome>>>" -eq "pending")
+		#%endregion
+
+		#%region CREATE CONTRACT IN SAP ───────────────────────────────────────────
+		DefineVariable as "currentStep" with the value "Init"
+		DefineVariable as "lastSAPError" with the value ""
+
+		try
+			## Reset to transaction for each record so navigation is consistent
+			DefineVariable as "currentStep" with the value "Start Transaction"
+				SAP StartTransaction zwb21
+
+			#%region Entry Screen (type + org) ───────────────────────────────────
+			DefineVariable as "currentStep" with the value "Entry Screen"
+			## Contract Type
+			if (("<<<contractType>>>" -like "P*") -OR ("<<<contractType>>>" -eq "YP01"))
+					SAP SelectComboBox id wnd[0]/usr/cmbP_LSCTP1 P
+			else
+					SAP SelectComboBox id wnd[0]/usr/cmbP_LSCTP1 S
+			end
+
+				SAP WriteText ElementId wnd[0]/usr/ctxtP_ORG1 Text "<<<orgData>>>"
+				SAP WriteText ElementId wnd[0]/usr/ctxtP_PGRP1 Text "<<<purchasingGroup>>>"
+				SAP SendKey 0
+				RunScript CheckSAPStatus
+				SAP ClickButton id wnd[0]/tbar[1]/btn[8]
+				RunScript CheckSAPStatus
+			#%endregion
+
+
+			#%region Header Details ──────────────────────────────────────────────
+			DefineVariable as "currentStep" with the value "Header Details (Basic)"
 		if ("<<<priceType>>>" -eq "FLAT")
-			SAP SelectComboBox id wnd[0]/usr/subSUBSCREEN:ZACMRE_DEAL_CONTRACT:2200/cmbSG_HEADER_DETAILS-LSPRG 1
+				SAP SelectComboBox id wnd[0]/usr/subSUBSCREEN:ZACMRE_DEAL_CONTRACT:2200/cmbSG_HEADER_DETAILS-LSPRG 1
 		else
-			SAP SelectComboBox id wnd[0]/usr/subSUBSCREEN:ZACMRE_DEAL_CONTRACT:2200/cmbSG_HEADER_DETAILS-LSPRG 4
+				SAP SelectComboBox id wnd[0]/usr/subSUBSCREEN:ZACMRE_DEAL_CONTRACT:2200/cmbSG_HEADER_DETAILS-LSPRG 4
 		end
 
-		SAP WriteText ElementId wnd[0]/usr/subSUBSCREEN:ZACMRE_DEAL_CONTRACT:2200/ctxtSG_HEADER_DETAILS-BUDAT Text "<<<contractDate>>>"
-		SAP WriteText ElementId wnd[0]/usr/subSUBSCREEN:ZACMRE_DEAL_CONTRACT:2200/ctxtSG_HEADER_DETAILS-WERKS Text "<<<plant>>>"
-		SAP WriteText ElementId wnd[0]/usr/subSUBSCREEN:ZACMRE_DEAL_CONTRACT:2200/ctxtSG_HEADER_DETAILS-MATNR Text "<<<material>>>"
-		SAP WriteText ElementId wnd[0]/usr/subSUBSCREEN:ZACMRE_DEAL_CONTRACT:2200/txtSG_HEADER_DETAILS-MENGE Text "<<<quantity>>>"
-		SAP WriteText ElementId wnd[0]/usr/subSUBSCREEN:ZACMRE_DEAL_CONTRACT:2200/ctxtSG_HEADER_DETAILS-LIFNR Text "<<<bp>>>"
-		SAP SendKey 0
-		SAP GetStatusInfo as StatInfo
-		DefineVariable as "sapStatusMsg" with the value "<<<StatInfo[0]>>>"
-		DefineVariable as "sapStatusId" with the value "<<<StatInfo[1]>>>"
-		DefineVariable as "sapStatusType" with the value "<<<StatInfo[2]>>>"
-		if ("<<<sapStatusType>>>" -eq "E")
-			DefineVariable as "lastSAPError" with the value "SAP(<<<sapStatusType>>>) [<<<sapStatusId>>>]: <<<sapStatusMsg>>>"
-		end
-		if ("<<<sapStatusType>>>" -eq "A")
-			DefineVariable as "lastSAPError" with the value "SAP(<<<sapStatusType>>>) [<<<sapStatusId>>>]: <<<sapStatusMsg>>>"
-		end
-		if ("<<<sapStatusType>>>" -eq "X")
-			DefineVariable as "lastSAPError" with the value "SAP(<<<sapStatusType>>>) [<<<sapStatusId>>>]: <<<sapStatusMsg>>>"
-		end
-		if ("<<<sapStatusType>>>" -eq "S")
-			DefineVariable as "lastSAPError" with the value ""
-		end
-		if ("<<<sapStatusType>>>" -eq "I")
-			DefineVariable as "lastSAPError" with the value ""
-		end
-		if ("<<<sapStatusType>>>" -eq "W")
-			DefineVariable as "lastSAPError" with the value ""
-		end
+			SAP WriteText ElementId wnd[0]/usr/subSUBSCREEN:ZACMRE_DEAL_CONTRACT:2200/ctxtSG_HEADER_DETAILS-BUDAT Text "<<<contractDate>>>"
+			SAP WriteText ElementId wnd[0]/usr/subSUBSCREEN:ZACMRE_DEAL_CONTRACT:2200/ctxtSG_HEADER_DETAILS-WERKS Text "<<<plant>>>"
+			SAP WriteText ElementId wnd[0]/usr/subSUBSCREEN:ZACMRE_DEAL_CONTRACT:2200/ctxtSG_HEADER_DETAILS-MATNR Text "<<<material>>>"
+			SAP WriteText ElementId wnd[0]/usr/subSUBSCREEN:ZACMRE_DEAL_CONTRACT:2200/txtSG_HEADER_DETAILS-MENGE Text "<<<quantity>>>"
+			SAP WriteText ElementId wnd[0]/usr/subSUBSCREEN:ZACMRE_DEAL_CONTRACT:2200/ctxtSG_HEADER_DETAILS-LIFNR Text "<<<bp>>>"
+			SAP SendKey 0
+			RunScript CheckSAPStatus
 
 		DefineVariable as "currentStep" with the value "Header Details (Dates/Terms)"
-		SAP WriteText ElementId wnd[0]/usr/subSUBSCREEN:ZACMRE_DEAL_CONTRACT:2200/ctxtSG_HEADER_DETAILS-DATE_FROM Text "<<<deliveryPeriodFrom>>>"
-		SAP WriteText ElementId wnd[0]/usr/subSUBSCREEN:ZACMRE_DEAL_CONTRACT:2200/ctxtSG_HEADER_DETAILS-DATE_TO Text "<<<deliveryPeriodTo>>>"
-		SAP WriteText ElementId wnd[0]/usr/subSUBSCREEN:ZACMRE_DEAL_CONTRACT:2200/ctxtSG_HEADER_DETAILS-TERM Text "<<<paymentTerms>>>"
-		SAP WriteText ElementId wnd[0]/usr/subSUBSCREEN:ZACMRE_DEAL_CONTRACT:2200/ctxtSG_HEADER_DETAILS-INCO2 Text "<<<incoterms>>>"
+			SAP WriteText ElementId wnd[0]/usr/subSUBSCREEN:ZACMRE_DEAL_CONTRACT:2200/ctxtSG_HEADER_DETAILS-DATE_FROM Text "<<<deliveryPeriodFrom>>>"
+			SAP WriteText ElementId wnd[0]/usr/subSUBSCREEN:ZACMRE_DEAL_CONTRACT:2200/ctxtSG_HEADER_DETAILS-DATE_TO Text "<<<deliveryPeriodTo>>>"
+			SAP WriteText ElementId wnd[0]/usr/subSUBSCREEN:ZACMRE_DEAL_CONTRACT:2200/ctxtSG_HEADER_DETAILS-TERM Text "<<<paymentTerms>>>"
+			SAP WriteText ElementId wnd[0]/usr/subSUBSCREEN:ZACMRE_DEAL_CONTRACT:2200/ctxtSG_HEADER_DETAILS-INCO2 Text "<<<incoterms>>>"
 
 		## Origin/Destination (write as provided; if Origin is empty, SAP may accept or validate)
-		SAP WriteText ElementId wnd[0]/usr/subSUBSCREEN:ZACMRE_DEAL_CONTRACT:2200/ctxtSG_HEADER_DETAILS-CITY_ORIGIN Text "<<<origin>>>"
-		SAP WriteText ElementId wnd[0]/usr/subSUBSCREEN:ZACMRE_DEAL_CONTRACT:2200/ctxtSG_HEADER_DETAILS-CITY_DESTINATION Text "<<<destination>>>"
-		SAP SendKey 0
-		SAP GetStatusInfo as StatInfo
-		DefineVariable as "sapStatusMsg" with the value "<<<StatInfo[0]>>>"
-		DefineVariable as "sapStatusId" with the value "<<<StatInfo[1]>>>"
-		DefineVariable as "sapStatusType" with the value "<<<StatInfo[2]>>>"
-		if ("<<<sapStatusType>>>" -eq "E")
-			DefineVariable as "lastSAPError" with the value "SAP(<<<sapStatusType>>>) [<<<sapStatusId>>>]: <<<sapStatusMsg>>>"
-		end
-		if ("<<<sapStatusType>>>" -eq "A")
-			DefineVariable as "lastSAPError" with the value "SAP(<<<sapStatusType>>>) [<<<sapStatusId>>>]: <<<sapStatusMsg>>>"
-		end
-		if ("<<<sapStatusType>>>" -eq "X")
-			DefineVariable as "lastSAPError" with the value "SAP(<<<sapStatusType>>>) [<<<sapStatusId>>>]: <<<sapStatusMsg>>>"
-		end
-		if ("<<<sapStatusType>>>" -eq "S")
-			DefineVariable as "lastSAPError" with the value ""
-		end
-		if ("<<<sapStatusType>>>" -eq "I")
-			DefineVariable as "lastSAPError" with the value ""
-		end
-		if ("<<<sapStatusType>>>" -eq "W")
-			DefineVariable as "lastSAPError" with the value ""
-		end
+			SAP WriteText ElementId wnd[0]/usr/subSUBSCREEN:ZACMRE_DEAL_CONTRACT:2200/ctxtSG_HEADER_DETAILS-CITY_ORIGIN Text "<<<origin>>>"
+			SAP WriteText ElementId wnd[0]/usr/subSUBSCREEN:ZACMRE_DEAL_CONTRACT:2200/ctxtSG_HEADER_DETAILS-CITY_DESTINATION Text "<<<destination>>>"
+			SAP SendKey 0
+			RunScript CheckSAPStatus
 		#%endregion
 
 
-		#%region Characteristics ─────────────────────────────────────────────
-		DefineVariable as "currentStep" with the value "Characteristics"
+			#%region Characteristics ─────────────────────────────────────────────
+			DefineVariable as "currentStep" with the value "Characteristics"
 		## Apply provided characteristics to SAP table where names match.
-		SAP ClickButton id wnd[0]/tbar[1]/btn[7]
+			SAP ClickButton id wnd[0]/tbar[1]/btn[7]
 
-		DefineVariable as "counter" with the value "0"
-
-		for 11 times {
-			try
-				SAP ReadElement wnd[0]/usr/subCHARACTERISTICS:SAPLCEI0:1400/tblSAPLCEI0CHARACTER_VALUES/ctxtRCTMS-MNAME[0,<<<counter>>>] as key
-			catch
-				break
+		DefineVariable type "int" as "page" with the value "0"
+		for 2 times {
+			if (<<<page>>> -gt 0)
+				## Pos 12 = scroll to second page of characteristics
+					SAP VerticalScroll GridId wnd[0]/usr/subCHARACTERISTICS:SAPLCEI0:1400/tblSAPLCEI0CHARACTER_VALUES Pos 12
 			end
-
-			## Stop if table row is empty
-			if ("<<<key>>>" -eq "")
-				break
-			end
-
-			foreach item in characteristics {
-				ApplyRegex ".+?(?=,)" to the string "<<<item>>>" and save as "charName"
-				if ("<<<key>>>" -eq "<<<charName>>>")
-					ApplyRegex "(?<=,).*$" to the string "<<<item>>>" and save as "charValue"
-					SAP WriteText ElementId wnd[0]/usr/subCHARACTERISTICS:SAPLCEI0:1400/tblSAPLCEI0CHARACTER_VALUES/ctxtRCTMS-MWERT[1,<<<counter>>>] Text "<<<charValue>>>"
+			DefineVariable as "counter" with the value "0"
+			## 11 = visible rows per page in the characteristics table
+			for 11 times {
+				try
+						SAP ReadElement wnd[0]/usr/subCHARACTERISTICS:SAPLCEI0:1400/tblSAPLCEI0CHARACTER_VALUES/ctxtRCTMS-MNAME[0,<<<counter>>>] as key
+				catch
 					break
 				end
-			}
-
-			MathOperation <<<counter>>> + 1 and save as counter
-		}
-
-		SAP VerticalScroll GridId wnd[0]/usr/subCHARACTERISTICS:SAPLCEI0:1400/tblSAPLCEI0CHARACTER_VALUES Pos 12
-		DefineVariable as "counter" with the value "0"
-
-		for 11 times {
-			try
-				SAP ReadElement wnd[0]/usr/subCHARACTERISTICS:SAPLCEI0:1400/tblSAPLCEI0CHARACTER_VALUES/ctxtRCTMS-MNAME[0,<<<counter>>>] as key
-			catch
-				break
-			end
-
-			if ("<<<key>>>" -eq "")
-				break
-			end
-
-			foreach item in characteristics {
-				ApplyRegex ".+?(?=,)" to the string "<<<item>>>" and save as "charName"
-				if ("<<<key>>>" -eq "<<<charName>>>")
-					ApplyRegex "(?<=,).*$" to the string "<<<item>>>" and save as "charValue"
-					SAP WriteText ElementId wnd[0]/usr/subCHARACTERISTICS:SAPLCEI0:1400/tblSAPLCEI0CHARACTER_VALUES/ctxtRCTMS-MWERT[1,<<<counter>>>] Text "<<<charValue>>>"
+				## Stop if table row is empty
+				if ("<<<key>>>" -eq "")
 					break
 				end
+				foreach item in characteristics {
+					ApplyRegex ".+?(?=,)" to the string "<<<item>>>" and save as "charName"
+					if ("<<<key>>>" -eq "<<<charName>>>")
+						ApplyRegex "(?<=,).*$" to the string "<<<item>>>" and save as "charValue"
+							SAP WriteText ElementId wnd[0]/usr/subCHARACTERISTICS:SAPLCEI0:1400/tblSAPLCEI0CHARACTER_VALUES/ctxtRCTMS-MWERT[1,<<<counter>>>] Text "<<<charValue>>>"
+						break
+					end
+				}
+				MathOperation <<<counter>>> + 1 and save as counter
 			}
-
-			MathOperation <<<counter>>> + 1 and save as counter
+			MathOperation <<<page>>> + 1 and save as page
 		}
 
 		## Return to contract
-		SAP ClickButton id wnd[0]/tbar[0]/btn[3]
+			SAP ClickButton id wnd[0]/tbar[0]/btn[3]
 		#%endregion
 
 
-		#%region Price Details ───────────────────────────────────────────────
-		DefineVariable as "currentStep" with the value "Price Details (Header)"
-		SAP WriteText ElementId wnd[0]/usr/subSS_HD_PRICE_DETAILS:ZACMRE_DEAL_CONTRACT:2800/ctxtSG_HEADER_PRICE_SC-COVER_MONTH_VAL Text "<<<coverMonth>>>"
+			#%region Price Details ───────────────────────────────────────────────
+			DefineVariable as "currentStep" with the value "Price Details (Header)"
+			SAP WriteText ElementId wnd[0]/usr/subSS_HD_PRICE_DETAILS:ZACMRE_DEAL_CONTRACT:2800/ctxtSG_HEADER_PRICE_SC-COVER_MONTH_VAL Text "<<<coverMonth>>>"
 
-		## Market Price normalized for SAP decimal format (if needed)
+		## Market Price normalized for SAP decimal format (strip thousands separator then decimal)
+		ReplaceFromVariable {marketPrice} this {,} for {}
 		ReplaceFromVariable {marketPrice} this {.} for {,}
-		SAP WriteText ElementId wnd[0]/usr/subSS_HD_PRICE_DETAILS:ZACMRE_DEAL_CONTRACT:2800/txtSG_HEADER_PRICE_SC-MKT_FUT_VAL Text "<<<marketPrice>>>"
+			SAP WriteText ElementId wnd[0]/usr/subSS_HD_PRICE_DETAILS:ZACMRE_DEAL_CONTRACT:2800/txtSG_HEADER_PRICE_SC-MKT_FUT_VAL Text "<<<marketPrice>>>"
 
-		SAP WriteText ElementId wnd[0]/usr/subSS_HD_PRICE_DETAILS:ZACMRE_DEAL_CONTRACT:2800/txtSG_HEADER_PRICE_SC-FX Text "<<<fx>>>"
-		SAP SendKey 0
-		SAP GetStatusInfo as StatInfo
-		DefineVariable as "sapStatusMsg" with the value "<<<StatInfo[0]>>>"
-		DefineVariable as "sapStatusId" with the value "<<<StatInfo[1]>>>"
-		DefineVariable as "sapStatusType" with the value "<<<StatInfo[2]>>>"
-		if ("<<<sapStatusType>>>" -eq "E")
-			DefineVariable as "lastSAPError" with the value "SAP(<<<sapStatusType>>>) [<<<sapStatusId>>>]: <<<sapStatusMsg>>>"
-		end
-		if ("<<<sapStatusType>>>" -eq "A")
-			DefineVariable as "lastSAPError" with the value "SAP(<<<sapStatusType>>>) [<<<sapStatusId>>>]: <<<sapStatusMsg>>>"
-		end
-		if ("<<<sapStatusType>>>" -eq "X")
-			DefineVariable as "lastSAPError" with the value "SAP(<<<sapStatusType>>>) [<<<sapStatusId>>>]: <<<sapStatusMsg>>>"
-		end
-		if ("<<<sapStatusType>>>" -eq "S")
-			DefineVariable as "lastSAPError" with the value ""
-		end
-		if ("<<<sapStatusType>>>" -eq "I")
-			DefineVariable as "lastSAPError" with the value ""
-		end
-		if ("<<<sapStatusType>>>" -eq "W")
-			DefineVariable as "lastSAPError" with the value ""
-		end
+			SAP WriteText ElementId wnd[0]/usr/subSS_HD_PRICE_DETAILS:ZACMRE_DEAL_CONTRACT:2800/txtSG_HEADER_PRICE_SC-FX Text "<<<fx>>>"
+			SAP SendKey 0
+			RunScript CheckSAPStatus
 
 		DefineVariable as "currentStep" with the value "Price Details (BID)"
-		SAP WriteText ElementId wnd[0]/usr/subSS_PRICE_DETAILS:ZACMRE_DEAL_CONTRACT:7000/txt<SG>-BID-BASE_PRICE_VAL Text "<<<bidPrice>>>"
-		SAP WriteText ElementId wnd[0]/usr/subSS_PRICE_DETAILS:ZACMRE_DEAL_CONTRACT:7000/txt<SG>-BID-CUPSCORE_VAL Text "<<<cupScorePremium>>>"
-		SAP SendKey 0
-		SAP GetStatusInfo as StatInfo
-		DefineVariable as "sapStatusMsg" with the value "<<<StatInfo[0]>>>"
-		DefineVariable as "sapStatusId" with the value "<<<StatInfo[1]>>>"
-		DefineVariable as "sapStatusType" with the value "<<<StatInfo[2]>>>"
-		if ("<<<sapStatusType>>>" -eq "E")
-			DefineVariable as "lastSAPError" with the value "SAP(<<<sapStatusType>>>) [<<<sapStatusId>>>]: <<<sapStatusMsg>>>"
-		end
-		if ("<<<sapStatusType>>>" -eq "A")
-			DefineVariable as "lastSAPError" with the value "SAP(<<<sapStatusType>>>) [<<<sapStatusId>>>]: <<<sapStatusMsg>>>"
-		end
-		if ("<<<sapStatusType>>>" -eq "X")
-			DefineVariable as "lastSAPError" with the value "SAP(<<<sapStatusType>>>) [<<<sapStatusId>>>]: <<<sapStatusMsg>>>"
-		end
-		if ("<<<sapStatusType>>>" -eq "S")
-			DefineVariable as "lastSAPError" with the value ""
-		end
-		if ("<<<sapStatusType>>>" -eq "I")
-			DefineVariable as "lastSAPError" with the value ""
-		end
-		if ("<<<sapStatusType>>>" -eq "W")
-			DefineVariable as "lastSAPError" with the value ""
-		end
+			SAP WriteText ElementId wnd[0]/usr/subSS_PRICE_DETAILS:ZACMRE_DEAL_CONTRACT:7000/txt<SG>-BID-BASE_PRICE_VAL Text "<<<bidPrice>>>"
+			SAP WriteText ElementId wnd[0]/usr/subSS_PRICE_DETAILS:ZACMRE_DEAL_CONTRACT:7000/txt<SG>-BID-CUPSCORE_VAL Text "<<<cupScorePremium>>>"
+			SAP SendKey 0
+			RunScript CheckSAPStatus
 
-		SAP ClickButton id wnd[0]/tbar[1]/btn[8]
-		SAP ClickButton id wnd[1]/usr/btnBUTTON_1
+			SAP ClickButton id wnd[0]/tbar[1]/btn[8]
+		#? Warning: Assumes confirmation dialog (wnd[1]) always appears after btn[8]. If SAP skips the dialog for certain contract types, this instruction will fail and fall into the outer catch.
+			SAP ClickButton id wnd[1]/usr/btnBUTTON_1
 		#%endregion
 
 
-		#%region Texts ───────────────────────────────────────────────────────
-		DefineVariable as "currentStep" with the value "Texts"
-		SAP SelectTab id "wnd[0]/usr/subSCREEN:SAPLWB2A:0250/tabsSTRIPT_AH_HEAD/tabpTEXT"
-
-		## General Remarks
-		SAP SelectTreeItem TreeId wnd[0]/usr/subSCREEN:SAPLWB2A:0250/tabsSTRIPT_AH_HEAD/tabpTEXT/ssubHEADER_SUB:SAPLWB2A:0137/subSUBSCREEN_TEXT:SAPLV70T:2100/cntlSPLITTER_CONTAINER/shellcont/shellcont/shell/shellcont[0]/shell Node "0001" Item "Column1"
-		SAP DoubleClickTreeItem TreeId wnd[0]/usr/subSCREEN:SAPLWB2A:0250/tabsSTRIPT_AH_HEAD/tabpTEXT/ssubHEADER_SUB:SAPLWB2A:0137/subSUBSCREEN_TEXT:SAPLV70T:2100/cntlSPLITTER_CONTAINER/shellcont/shellcont/shell/shellcont[0]/shell Node "0001" Item "Column1"
-		SAP WriteText ElementId wnd[0]/usr/subSCREEN:SAPLWB2A:0250/tabsSTRIPT_AH_HEAD/tabpTEXT/ssubHEADER_SUB:SAPLWB2A:0137/subSUBSCREEN_TEXT:SAPLV70T:2100/cntlSPLITTER_CONTAINER/shellcont/shellcont/shell/shellcont[1]/shell Text "<<<textGeneralRemarks>>>"
-
-		## Producer FLO ID
-		SAP SelectTreeItem TreeId wnd[0]/usr/subSCREEN:SAPLWB2A:0250/tabsSTRIPT_AH_HEAD/tabpTEXT/ssubHEADER_SUB:SAPLWB2A:0137/subSUBSCREEN_TEXT:SAPLV70T:2100/cntlSPLITTER_CONTAINER/shellcont/shellcont/shell/shellcont[0]/shell Node "Z043" Item "Column1"
-		SAP DoubleClickTreeItem TreeId wnd[0]/usr/subSCREEN:SAPLWB2A:0250/tabsSTRIPT_AH_HEAD/tabpTEXT/ssubHEADER_SUB:SAPLWB2A:0137/subSUBSCREEN_TEXT:SAPLV70T:2100/cntlSPLITTER_CONTAINER/shellcont/shellcont/shell/shellcont[0]/shell Node "Z043" Item "Column1"
-		SAP WriteText ElementId wnd[0]/usr/subSCREEN:SAPLWB2A:0250/tabsSTRIPT_AH_HEAD/tabpTEXT/ssubHEADER_SUB:SAPLWB2A:0137/subSUBSCREEN_TEXT:SAPLV70T:2100/cntlSPLITTER_CONTAINER/shellcont/shellcont/shell/shellcont[1]/shell Text "<<<textProducerFloId>>>"
-
-		## Price
-		SAP SelectTreeItem TreeId wnd[0]/usr/subSCREEN:SAPLWB2A:0250/tabsSTRIPT_AH_HEAD/tabpTEXT/ssubHEADER_SUB:SAPLWB2A:0137/subSUBSCREEN_TEXT:SAPLV70T:2100/cntlSPLITTER_CONTAINER/shellcont/shellcont/shell/shellcont[0]/shell Node "Z009" Item "Column1"
-		SAP DoubleClickTreeItem TreeId wnd[0]/usr/subSCREEN:SAPLWB2A:0250/tabsSTRIPT_AH_HEAD/tabpTEXT/ssubHEADER_SUB:SAPLWB2A:0137/subSUBSCREEN_TEXT:SAPLV70T:2100/cntlSPLITTER_CONTAINER/shellcont/shellcont/shell/shellcont[0]/shell Node "Z009" Item "Column1"
-		SAP WriteText ElementId wnd[0]/usr/subSCREEN:SAPLWB2A:0250/tabsSTRIPT_AH_HEAD/tabpTEXT/ssubHEADER_SUB:SAPLWB2A:0137/subSUBSCREEN_TEXT:SAPLV70T:2100/cntlSPLITTER_CONTAINER/shellcont/shellcont/shell/shellcont[1]/shell Text "<<<textPrice>>>"
-
-		## Additional Conditions
-		SAP SelectTreeItem TreeId wnd[0]/usr/subSCREEN:SAPLWB2A:0250/tabsSTRIPT_AH_HEAD/tabpTEXT/ssubHEADER_SUB:SAPLWB2A:0137/subSUBSCREEN_TEXT:SAPLV70T:2100/cntlSPLITTER_CONTAINER/shellcont/shellcont/shell/shellcont[0]/shell Node "Z048" Item "Column1"
-		SAP DoubleClickTreeItem TreeId wnd[0]/usr/subSCREEN:SAPLWB2A:0250/tabsSTRIPT_AH_HEAD/tabpTEXT/ssubHEADER_SUB:SAPLWB2A:0137/subSUBSCREEN_TEXT:SAPLV70T:2100/cntlSPLITTER_CONTAINER/shellcont/shellcont/shell/shellcont[0]/shell Node "Z048" Item "Column1"
-		SAP WriteText ElementId wnd[0]/usr/subSCREEN:SAPLWB2A:0250/tabsSTRIPT_AH_HEAD/tabpTEXT/ssubHEADER_SUB:SAPLWB2A:0137/subSUBSCREEN_TEXT:SAPLV70T:2100/cntlSPLITTER_CONTAINER/shellcont/shellcont/shell/shellcont[1]/shell Text "<<<textAdditionalCondition>>>"
+			#%region Texts ───────────────────────────────────────────────────────
+			DefineVariable as "currentStep" with the value "Texts"
+		DefineVariable type "List" as "textEntries"
+		if ("<<<textGeneralRemarks>>>" -ne "")
+			AddValueToList "textEntries" value "0001,<<<textGeneralRemarks>>>"
+		end
+		if ("<<<textProducerFloId>>>" -ne "")
+			AddValueToList "textEntries" value "Z043,<<<textProducerFloId>>>"
+		end
+		if ("<<<textPrice>>>" -ne "")
+			AddValueToList "textEntries" value "Z009,<<<textPrice>>>"
+		end
+		if ("<<<textAdditionalCondition>>>" -ne "")
+			AddValueToList "textEntries" value "Z048,<<<textAdditionalCondition>>>"
+		end
+		CountItems in textEntries and save_as textCount
+		if ("<<<textCount>>>" -gt "0")
+				SAP SelectTab id "wnd[0]/usr/subSCREEN:SAPLWB2A:0250/tabsSTRIPT_AH_HEAD/tabpTEXT"
+			foreach textItem in textEntries {
+				ApplyRegex ".+?(?=,)" to the string "<<<textItem>>>" and save as "txtNode"
+				ApplyRegex "(?<=,).*$" to the string "<<<textItem>>>" and save as "txtVal"
+					SAP SelectTreeItem TreeId wnd[0]/usr/subSCREEN:SAPLWB2A:0250/tabsSTRIPT_AH_HEAD/tabpTEXT/ssubHEADER_SUB:SAPLWB2A:0137/subSUBSCREEN_TEXT:SAPLV70T:2100/cntlSPLITTER_CONTAINER/shellcont/shellcont/shell/shellcont[0]/shell Node "<<<txtNode>>>" Item "Column1"
+					SAP DoubleClickTreeItem TreeId wnd[0]/usr/subSCREEN:SAPLWB2A:0250/tabsSTRIPT_AH_HEAD/tabpTEXT/ssubHEADER_SUB:SAPLWB2A:0137/subSUBSCREEN_TEXT:SAPLV70T:2100/cntlSPLITTER_CONTAINER/shellcont/shellcont/shell/shellcont[0]/shell Node "<<<txtNode>>>" Item "Column1"
+					SAP WriteText ElementId wnd[0]/usr/subSCREEN:SAPLWB2A:0250/tabsSTRIPT_AH_HEAD/tabpTEXT/ssubHEADER_SUB:SAPLWB2A:0137/subSUBSCREEN_TEXT:SAPLV70T:2100/cntlSPLITTER_CONTAINER/shellcont/shellcont/shell/shellcont[1]/shell Text "<<<txtVal>>>"
+			}
+		end
 		#%endregion
 
 
-		#%region Rules ───────────────────────────────────────────────────────
-		DefineVariable as "currentStep" with the value "Rules"
-		SAP SelectTab id "wnd[0]/usr/subSCREEN:SAPLWB2A:0250/tabsSTRIPT_AH_HEAD/tabpAOHD"
+		DefineVariable as "rulesHadError" with the value "false"
+		DefineVariable as "rulesErrorDetail" with the value ""
+		DefineVariable type "List" as "ruleCheckValues"
+		AddValueToList "ruleCheckValues" value "<<<rulesCoPurchaseAdvances>>>"
+		AddValueToList "ruleCheckValues" value "<<<rulesCoPurchaseWeightBasis>>>"
+		AddValueToList "ruleCheckValues" value "<<<rulesCoPurchaseReimbursTerms>>>"
+		AddValueToList "ruleCheckValues" value "<<<rulesCoPurchaseRules>>>"
+		AddValueToList "ruleCheckValues" value "<<<rulesCoPurchaseArbitration>>>"
+		AddValueToList "ruleCheckValues" value "<<<rulesCoPurchaseInsurance>>>"
+		AddValueToList "ruleCheckValues" value "<<<rulesCoPurchaseAdditionalConditions>>>"
+		AddValueToList "ruleCheckValues" value "<<<rulesCoPurchaseApprovalConditions>>>"
+		AddValueToList "ruleCheckValues" value "<<<rulesCoPurchaseStuffing>>>"
+		AddValueToList "ruleCheckValues" value "<<<rulesContractFormFixation>>>"
+		DefineVariable as "hasRules" with the value "false"
+		foreach rv in ruleCheckValues {
+			if ("<<<rv>>>" -ne "")
+				DefineVariable as "hasRules" with the value "true"
+				break
+			end
+		}
+		if ("<<<hasRules>>>" -eq "true")
+			#%region Rules ───────────────────────────────────────────────────────
+			DefineVariable as "currentStep" with the value "Rules"
+			SAP SelectTab id "wnd[0]/usr/subSCREEN:SAPLWB2A:0250/tabsSTRIPT_AH_HEAD/tabpAOHD"
+		## Eight CO-Purchase combo boxes kept as explicit blocks; dynamic element ID (<<<var>>> in id) not verified for SAP SelectComboBox.
 
-		SAP SelectRb id wnd[0]/usr/subSCREEN:SAPLWB2A:0251/tabsSTRIPT_AH_HEAD/tabpAOHD/ssubHEADER_SUB:SAPLWB2A:0145/subTRADE:SAPLWB2B_SCREEN_HANDLING:0101/subCUSTOMER_DATA:SAPLWB2B_SCREEN_HANDLING:8001/ssubCUSTOMER_DATA:SAPLZACMFG_SCREEN_GRP_CTRL:0010/subSS_HD_1:SAPLZACMFG_SCREEN_GRP_CTRL:0100/ssubSS_TEXTS:SAPLZACMFG_SCREEN_GRP_CTRL:0300/rad<SG_DYNPRO>-SCREEN_ELEMENT14
+		## Advances (CO-Purchase)
+		if ("<<<rulesCoPurchaseAdvances>>>" -ne "")
+			try
+					SAP SelectComboBox id wnd[0]/usr/subSCREEN:SAPLWB2A:0260/tabsSTRIPT_AH_HEAD/tabpAOOV/ssubHEADER_SUB:SAPLWB2A:0146/subTRADE:SAPLWB2B_SCREEN_HANDLING:0102/ssubCUSTOMER_DATA:SAPLWB2B_SCREEN_HANDLING:8003/ssubCUSTOMER_DATA:SAPLZACMFG_SCREEN_GRP_CTRL:0010/subSS_HD_1:SAPLZACMFG_SCREEN_GRP_CTRL:0100/ssubSS_TEXTS:SAPLZACMFG_SCREEN_GRP_CTRL:0300/cmb<SG_DYNPRO>-SCREEN_ELEMENT2 "<<<rulesCoPurchaseAdvances>>>"
+			catch as ex
+				DefineVariable as "rulesHadError" with the value "true"
+				DefineVariable as "rulesErrorDetail" with the value "<<<rulesErrorDetail>>> | Advances: <<<ex>>>"
+			end
+		end
 
-		SAP SelectComboBox id wnd[0]/usr/subSCREEN:SAPLWB2A:0251/tabsSTRIPT_AH_HEAD/tabpAOHD/ssubHEADER_SUB:SAPLWB2A:0145/subTRADE:SAPLWB2B_SCREEN_HANDLING:0101/subCUSTOMER_DATA:SAPLWB2B_SCREEN_HANDLING:8001/ssubCUSTOMER_DATA:SAPLZACMFG_SCREEN_GRP_CTRL:0010/subSS_HD_1:SAPLZACMFG_SCREEN_GRP_CTRL:0100/ssubSS_TEXTS:SAPLZACMFG_SCREEN_GRP_CTRL:0300/cmb<SG_DYNPRO>-SCREEN_ELEMENT2 "AN70 ADV OF 70% DPDING ON CREDIT LMT"
+		## Weight Basis (CO-Purchase)
+		if ("<<<rulesCoPurchaseWeightBasis>>>" -ne "")
+			try
+					SAP SelectComboBox id wnd[0]/usr/subSCREEN:SAPLWB2A:0260/tabsSTRIPT_AH_HEAD/tabpAOOV/ssubHEADER_SUB:SAPLWB2A:0146/subTRADE:SAPLWB2B_SCREEN_HANDLING:0102/ssubCUSTOMER_DATA:SAPLWB2B_SCREEN_HANDLING:8003/ssubCUSTOMER_DATA:SAPLZACMFG_SCREEN_GRP_CTRL:0010/subSS_HD_1:SAPLZACMFG_SCREEN_GRP_CTRL:0100/ssubSS_TEXTS:SAPLZACMFG_SCREEN_GRP_CTRL:0300/cmb<SG_DYNPRO>-SCREEN_ELEMENT4 "<<<rulesCoPurchaseWeightBasis>>>"
+			catch as ex
+				DefineVariable as "rulesHadError" with the value "true"
+				DefineVariable as "rulesErrorDetail" with the value "<<<rulesErrorDetail>>> | WeightBasis: <<<ex>>>"
+			end
+		end
 
-		SAP SelectComboBox id wnd[0]/usr/subSCREEN:SAPLWB2A:0251/tabsSTRIPT_AH_HEAD/tabpAOHD/ssubHEADER_SUB:SAPLWB2A:0145/subTRADE:SAPLWB2B_SCREEN_HANDLING:0101/subCUSTOMER_DATA:SAPLWB2B_SCREEN_HANDLING:8001/ssubCUSTOMER_DATA:SAPLZACMFG_SCREEN_GRP_CTRL:0010/subSS_HD_1:SAPLZACMFG_SCREEN_GRP_CTRL:0100/ssubSS_TEXTS:SAPLZACMFG_SCREEN_GRP_CTRL:0300/cmb<SG_DYNPRO>-SCREEN_ELEMENT4 "NSW050_FR NET SHIPPED WEIGHTS 0.5 %F"
+		## Reimburs. Terms (CO-Purchase)
+		if ("<<<rulesCoPurchaseReimbursTerms>>>" -ne "")
+			try
+					SAP SelectComboBox id wnd[0]/usr/subSCREEN:SAPLWB2A:0260/tabsSTRIPT_AH_HEAD/tabpAOOV/ssubHEADER_SUB:SAPLWB2A:0146/subTRADE:SAPLWB2B_SCREEN_HANDLING:0102/ssubCUSTOMER_DATA:SAPLWB2B_SCREEN_HANDLING:8003/ssubCUSTOMER_DATA:SAPLZACMFG_SCREEN_GRP_CTRL:0010/subSS_HD_1:SAPLZACMFG_SCREEN_GRP_CTRL:0100/ssubSS_TEXTS:SAPLZACMFG_SCREEN_GRP_CTRL:0300/cmb<SG_DYNPRO>-SCREEN_ELEMENT6 "<<<rulesCoPurchaseReimbursTerms>>>"
+			catch as ex
+				DefineVariable as "rulesHadError" with the value "true"
+				DefineVariable as "rulesErrorDetail" with the value "<<<rulesErrorDetail>>> | ReimbursTerms: <<<ex>>>"
+			end
+		end
 
-		SAP SelectComboBox id wnd[0]/usr/subSCREEN:SAPLWB2A:0251/tabsSTRIPT_AH_HEAD/tabpAOHD/ssubHEADER_SUB:SAPLWB2A:0145/subTRADE:SAPLWB2B_SCREEN_HANDLING:0101/subCUSTOMER_DATA:SAPLWB2B_SCREEN_HANDLING:8001/ssubCUSTOMER_DATA:SAPLZACMFG_SCREEN_GRP_CTRL:0010/subSS_HD_1:SAPLZACMFG_SCREEN_GRP_CTRL:0100/ssubSS_TEXTS:SAPLZACMFG_SCREEN_GRP_CTRL:0300/cmb<SG_DYNPRO>-SCREEN_ELEMENT6 "CADE LESS 5% AGST TRACE &/OR TC"
+		## Rules (CO-Purchase)
+		if ("<<<rulesCoPurchaseRules>>>" -ne "")
+			try
+					SAP SelectComboBox id wnd[0]/usr/subSCREEN:SAPLWB2A:0260/tabsSTRIPT_AH_HEAD/tabpAOOV/ssubHEADER_SUB:SAPLWB2A:0146/subTRADE:SAPLWB2B_SCREEN_HANDLING:0102/ssubCUSTOMER_DATA:SAPLWB2B_SCREEN_HANDLING:8003/ssubCUSTOMER_DATA:SAPLZACMFG_SCREEN_GRP_CTRL:0010/subSS_HD_1:SAPLZACMFG_SCREEN_GRP_CTRL:0100/ssubSS_TEXTS:SAPLZACMFG_SCREEN_GRP_CTRL:0300/cmb<SG_DYNPRO>-SCREEN_ELEMENT8 "<<<rulesCoPurchaseRules>>>"
+			catch as ex
+				DefineVariable as "rulesHadError" with the value "true"
+				DefineVariable as "rulesErrorDetail" with the value "<<<rulesErrorDetail>>> | Rules: <<<ex>>>"
+			end
+		end
 
-		SAP SelectComboBox id wnd[0]/usr/subSCREEN:SAPLWB2A:0251/tabsSTRIPT_AH_HEAD/tabpAOHD/ssubHEADER_SUB:SAPLWB2A:0145/subTRADE:SAPLWB2B_SCREEN_HANDLING:0101/subCUSTOMER_DATA:SAPLWB2B_SCREEN_HANDLING:8001/ssubCUSTOMER_DATA:SAPLZACMFG_SCREEN_GRP_CTRL:0010/subSS_HD_1:SAPLZACMFG_SCREEN_GRP_CTRL:0100/ssubSS_TEXTS:SAPLZACMFG_SCREEN_GRP_CTRL:0300/cmb<SG_DYNPRO>-SCREEN_ELEMENT8 "CONTRATO_MARCO"
+		## Arbitration (CO-Purchase)
+		if ("<<<rulesCoPurchaseArbitration>>>" -ne "")
+			try
+					SAP SelectComboBox id wnd[0]/usr/subSCREEN:SAPLWB2A:0260/tabsSTRIPT_AH_HEAD/tabpAOOV/ssubHEADER_SUB:SAPLWB2A:0146/subTRADE:SAPLWB2B_SCREEN_HANDLING:0102/ssubCUSTOMER_DATA:SAPLWB2B_SCREEN_HANDLING:8003/ssubCUSTOMER_DATA:SAPLZACMFG_SCREEN_GRP_CTRL:0010/subSS_HD_1:SAPLZACMFG_SCREEN_GRP_CTRL:0100/ssubSS_TEXTS:SAPLZACMFG_SCREEN_GRP_CTRL:0300/cmb<SG_DYNPRO>-SCREEN_ELEMENT10 "<<<rulesCoPurchaseArbitration>>>"
+			catch as ex
+				DefineVariable as "rulesHadError" with the value "true"
+				DefineVariable as "rulesErrorDetail" with the value "<<<rulesErrorDetail>>> | Arbitration: <<<ex>>>"
+			end
+		end
 
-		SAP SelectComboBox id wnd[0]/usr/subSCREEN:SAPLWB2A:0251/tabsSTRIPT_AH_HEAD/tabpAOHD/ssubHEADER_SUB:SAPLWB2A:0145/subTRADE:SAPLWB2B_SCREEN_HANDLING:0101/subCUSTOMER_DATA:SAPLWB2B_SCREEN_HANDLING:8001/ssubCUSTOMER_DATA:SAPLZACMFG_SCREEN_GRP_CTRL:0010/subSS_HD_1:SAPLZACMFG_SCREEN_GRP_CTRL:0100/ssubSS_TEXTS:SAPLZACMFG_SCREEN_GRP_CTRL:0300/cmb<SG_DYNPRO>-SCREEN_ELEMENT10 "COL"
+		## Add. Conditions (CO-Purchase)
+		if ("<<<rulesCoPurchaseAdditionalConditions>>>" -ne "")
+			try
+					SAP SelectComboBox id wnd[0]/usr/subSCREEN:SAPLWB2A:0260/tabsSTRIPT_AH_HEAD/tabpAOOV/ssubHEADER_SUB:SAPLWB2A:0146/subTRADE:SAPLWB2B_SCREEN_HANDLING:0102/ssubCUSTOMER_DATA:SAPLWB2B_SCREEN_HANDLING:8003/ssubCUSTOMER_DATA:SAPLZACMFG_SCREEN_GRP_CTRL:0010/subSS_HD_1:SAPLZACMFG_SCREEN_GRP_CTRL:0100/ssubSS_TEXTS:SAPLZACMFG_SCREEN_GRP_CTRL:0300/cmb<SG_DYNPRO>-SCREEN_ELEMENT16 "<<<rulesCoPurchaseAdditionalConditions>>>"
+			catch as ex
+				DefineVariable as "rulesHadError" with the value "true"
+				DefineVariable as "rulesErrorDetail" with the value "<<<rulesErrorDetail>>> | AddConditions: <<<ex>>>"
+			end
+		end
 
-		SAP SelectComboBox id wnd[0]/usr/subSCREEN:SAPLWB2A:0251/tabsSTRIPT_AH_HEAD/tabpAOHD/ssubHEADER_SUB:SAPLWB2A:0145/subTRADE:SAPLWB2B_SCREEN_HANDLING:0101/subCUSTOMER_DATA:SAPLWB2B_SCREEN_HANDLING:8001/ssubCUSTOMER_DATA:SAPLZACMFG_SCREEN_GRP_CTRL:0010/subSS_HD_1:SAPLZACMFG_SCREEN_GRP_CTRL:0100/ssubSS_TEXTS:SAPLZACMFG_SCREEN_GRP_CTRL:0300/cmb<SG_DYNPRO>-SCREEN_ELEMENT16 "FLAT-PARCHMENT_RFA_ACOPIADOR"
+		## Approval Condit. (CO-Purchase)
+		if ("<<<rulesCoPurchaseApprovalConditions>>>" -ne "")
+			try
+					SAP SelectComboBox id wnd[0]/usr/subSCREEN:SAPLWB2A:0260/tabsSTRIPT_AH_HEAD/tabpAOOV/ssubHEADER_SUB:SAPLWB2A:0146/subTRADE:SAPLWB2B_SCREEN_HANDLING:0102/ssubCUSTOMER_DATA:SAPLWB2B_SCREEN_HANDLING:8003/ssubCUSTOMER_DATA:SAPLZACMFG_SCREEN_GRP_CTRL:0010/subSS_HD_1:SAPLZACMFG_SCREEN_GRP_CTRL:0100/ssubSS_TEXTS:SAPLZACMFG_SCREEN_GRP_CTRL:0300/cmb<SG_DYNPRO>-SCREEN_ELEMENT18 "<<<rulesCoPurchaseApprovalConditions>>>"
+			catch as ex
+				DefineVariable as "rulesHadError" with the value "true"
+				DefineVariable as "rulesErrorDetail" with the value "<<<rulesErrorDetail>>> | ApprovalCondit: <<<ex>>>"
+			end
+		end
 
-		SAP SelectComboBox id wnd[0]/usr/subSCREEN:SAPLWB2A:0251/tabsSTRIPT_AH_HEAD/tabpAOHD/ssubHEADER_SUB:SAPLWB2A:0145/subTRADE:SAPLWB2B_SCREEN_HANDLING:0101/subCUSTOMER_DATA:SAPLWB2B_SCREEN_HANDLING:8001/ssubCUSTOMER_DATA:SAPLZACMFG_SCREEN_GRP_CTRL:0010/subSS_HD_1:SAPLZACMFG_SCREEN_GRP_CTRL:0100/ssubSS_TEXTS:SAPLZACMFG_SCREEN_GRP_CTRL:0300/cmb<SG_DYNPRO>-SCREEN_ELEMENT18 "SAQ-PARCHMENT"
+		## Stuffing (CO-Purchase)
+		if ("<<<rulesCoPurchaseStuffing>>>" -ne "")
+			try
+					SAP SelectComboBox id wnd[0]/usr/subSCREEN:SAPLWB2A:0260/tabsSTRIPT_AH_HEAD/tabpAOOV/ssubHEADER_SUB:SAPLWB2A:0146/subTRADE:SAPLWB2B_SCREEN_HANDLING:0102/ssubCUSTOMER_DATA:SAPLWB2B_SCREEN_HANDLING:8003/ssubCUSTOMER_DATA:SAPLZACMFG_SCREEN_GRP_CTRL:0010/subSS_HD_1:SAPLZACMFG_SCREEN_GRP_CTRL:0100/ssubSS_TEXTS:SAPLZACMFG_SCREEN_GRP_CTRL:0300/cmb<SG_DYNPRO>-SCREEN_ELEMENT20 "<<<rulesCoPurchaseStuffing>>>"
+			catch as ex
+				DefineVariable as "rulesHadError" with the value "true"
+				DefineVariable as "rulesErrorDetail" with the value "<<<rulesErrorDetail>>> | Stuffing: <<<ex>>>"
+			end
+		end
 
-		SAP ElementFocus ElementId wnd[0]/usr/subSCREEN:SAPLWB2A:0251/tabsSTRIPT_AH_HEAD/tabpAOHD/ssubHEADER_SUB:SAPLWB2A:0145/subTRADE:SAPLWB2B_SCREEN_HANDLING:0101/subCUSTOMER_DATA:SAPLWB2B_SCREEN_HANDLING:8001/ssubCUSTOMER_DATA:SAPLZACMFG_SCREEN_GRP_CTRL:0010/subSS_HD_1:SAPLZACMFG_SCREEN_GRP_CTRL:0100/ssubSS_TEXTS:SAPLZACMFG_SCREEN_GRP_CTRL:0300/rad<SG_DYNPRO>-SCREEN_ELEMENT22
+		## Insurance and Fixation use radio buttons on screen SAPLWB2A:0251; preceding combo boxes use SAPLWB2A:0260. SAP tab/screen transition is implicit.
+		## Insurance (BUYER / SELLER / NA)
+		if ("<<<rulesCoPurchaseInsurance>>>" -ne "")
+			DefineVariable as "insuranceMatched" with the value "false"
+			try
+				if ("<<<rulesCoPurchaseInsurance>>>" -eq "BUYER")
+						SAP SelectRb id wnd[0]/usr/subSCREEN:SAPLWB2A:0251/tabsSTRIPT_AH_HEAD/tabpAOHD/ssubHEADER_SUB:SAPLWB2A:0145/subTRADE:SAPLWB2B_SCREEN_HANDLING:0101/subCUSTOMER_DATA:SAPLWB2B_SCREEN_HANDLING:8001/ssubCUSTOMER_DATA:SAPLZACMFG_SCREEN_GRP_CTRL:0010/subSS_HD_1:SAPLZACMFG_SCREEN_GRP_CTRL:0100/ssubSS_TEXTS:SAPLZACMFG_SCREEN_GRP_CTRL:0300/rad<SG_DYNPRO>-SCREEN_ELEMENT12
+						SAP ElementFocus ElementId wnd[0]/usr/subSCREEN:SAPLWB2A:0251/tabsSTRIPT_AH_HEAD/tabpAOHD/ssubHEADER_SUB:SAPLWB2A:0145/subTRADE:SAPLWB2B_SCREEN_HANDLING:0101/subCUSTOMER_DATA:SAPLWB2B_SCREEN_HANDLING:8001/ssubCUSTOMER_DATA:SAPLZACMFG_SCREEN_GRP_CTRL:0010/subSS_HD_1:SAPLZACMFG_SCREEN_GRP_CTRL:0100/ssubSS_TEXTS:SAPLZACMFG_SCREEN_GRP_CTRL:0300/rad<SG_DYNPRO>-SCREEN_ELEMENT12
+					DefineVariable as "insuranceMatched" with the value "true"
+				end
+				if ("<<<rulesCoPurchaseInsurance>>>" -eq "SELLER")
+						SAP SelectRb id wnd[0]/usr/subSCREEN:SAPLWB2A:0251/tabsSTRIPT_AH_HEAD/tabpAOHD/ssubHEADER_SUB:SAPLWB2A:0145/subTRADE:SAPLWB2B_SCREEN_HANDLING:0101/subCUSTOMER_DATA:SAPLWB2B_SCREEN_HANDLING:8001/ssubCUSTOMER_DATA:SAPLZACMFG_SCREEN_GRP_CTRL:0010/subSS_HD_1:SAPLZACMFG_SCREEN_GRP_CTRL:0100/ssubSS_TEXTS:SAPLZACMFG_SCREEN_GRP_CTRL:0300/rad<SG_DYNPRO>-SCREEN_ELEMENT14
+						SAP ElementFocus ElementId wnd[0]/usr/subSCREEN:SAPLWB2A:0251/tabsSTRIPT_AH_HEAD/tabpAOHD/ssubHEADER_SUB:SAPLWB2A:0145/subTRADE:SAPLWB2B_SCREEN_HANDLING:0101/subCUSTOMER_DATA:SAPLWB2B_SCREEN_HANDLING:8001/ssubCUSTOMER_DATA:SAPLZACMFG_SCREEN_GRP_CTRL:0010/subSS_HD_1:SAPLZACMFG_SCREEN_GRP_CTRL:0100/ssubSS_TEXTS:SAPLZACMFG_SCREEN_GRP_CTRL:0300/rad<SG_DYNPRO>-SCREEN_ELEMENT14
+					DefineVariable as "insuranceMatched" with the value "true"
+				end
+				if ("<<<rulesCoPurchaseInsurance>>>" -eq "NA")
+						SAP SelectRb id wnd[0]/usr/subSCREEN:SAPLWB2A:0251/tabsSTRIPT_AH_HEAD/tabpAOHD/ssubHEADER_SUB:SAPLWB2A:0145/subTRADE:SAPLWB2B_SCREEN_HANDLING:0101/subCUSTOMER_DATA:SAPLWB2B_SCREEN_HANDLING:8001/ssubCUSTOMER_DATA:SAPLZACMFG_SCREEN_GRP_CTRL:0010/subSS_HD_1:SAPLZACMFG_SCREEN_GRP_CTRL:0100/ssubSS_TEXTS:SAPLZACMFG_SCREEN_GRP_CTRL:0300/rad<SG_DYNPRO>-SCREEN_ELEMENT13
+						SAP ElementFocus ElementId wnd[0]/usr/subSCREEN:SAPLWB2A:0251/tabsSTRIPT_AH_HEAD/tabpAOHD/ssubHEADER_SUB:SAPLWB2A:0145/subTRADE:SAPLWB2B_SCREEN_HANDLING:0101/subCUSTOMER_DATA:SAPLWB2B_SCREEN_HANDLING:8001/ssubCUSTOMER_DATA:SAPLZACMFG_SCREEN_GRP_CTRL:0010/subSS_HD_1:SAPLZACMFG_SCREEN_GRP_CTRL:0100/ssubSS_TEXTS:SAPLZACMFG_SCREEN_GRP_CTRL:0300/rad<SG_DYNPRO>-SCREEN_ELEMENT13
+					DefineVariable as "insuranceMatched" with the value "true"
+				end
+				if ("<<<insuranceMatched>>>" -ne "true")
+					DefineVariable as "rulesHadError" with the value "true"
+					DefineVariable as "rulesErrorDetail" with the value "<<<rulesErrorDetail>>> | Insurance: unrecognized value <<<rulesCoPurchaseInsurance>>>"
+				end
+			catch as ex
+				DefineVariable as "rulesHadError" with the value "true"
+				DefineVariable as "rulesErrorDetail" with the value "<<<rulesErrorDetail>>> | Insurance: <<<ex>>>"
+			end
+		end
+
+		## Fixation (SELLER / BUYER)
+		if ("<<<rulesContractFormFixation>>>" -ne "")
+			DefineVariable as "fixationMatched" with the value "false"
+			try
+				if ("<<<rulesContractFormFixation>>>" -eq "SELLER")
+						SAP SelectRb id wnd[0]/usr/subSCREEN:SAPLWB2A:0251/tabsSTRIPT_AH_HEAD/tabpAOHD/ssubHEADER_SUB:SAPLWB2A:0145/subTRADE:SAPLWB2B_SCREEN_HANDLING:0101/subCUSTOMER_DATA:SAPLWB2B_SCREEN_HANDLING:8001/ssubCUSTOMER_DATA:SAPLZACMFG_SCREEN_GRP_CTRL:0010/subSS_HD_1:SAPLZACMFG_SCREEN_GRP_CTRL:0100/ssubSS_TEXTS:SAPLZACMFG_SCREEN_GRP_CTRL:0300/rad<SG_DYNPRO>-SCREEN_ELEMENT23
+						SAP ElementFocus ElementId wnd[0]/usr/subSCREEN:SAPLWB2A:0251/tabsSTRIPT_AH_HEAD/tabpAOHD/ssubHEADER_SUB:SAPLWB2A:0145/subTRADE:SAPLWB2B_SCREEN_HANDLING:0101/subCUSTOMER_DATA:SAPLWB2B_SCREEN_HANDLING:8001/ssubCUSTOMER_DATA:SAPLZACMFG_SCREEN_GRP_CTRL:0010/subSS_HD_1:SAPLZACMFG_SCREEN_GRP_CTRL:0100/ssubSS_TEXTS:SAPLZACMFG_SCREEN_GRP_CTRL:0300/rad<SG_DYNPRO>-SCREEN_ELEMENT23
+					DefineVariable as "fixationMatched" with the value "true"
+				end
+				if ("<<<rulesContractFormFixation>>>" -eq "BUYER")
+						SAP SelectRb id wnd[0]/usr/subSCREEN:SAPLWB2A:0251/tabsSTRIPT_AH_HEAD/tabpAOHD/ssubHEADER_SUB:SAPLWB2A:0145/subTRADE:SAPLWB2B_SCREEN_HANDLING:0101/subCUSTOMER_DATA:SAPLWB2B_SCREEN_HANDLING:8001/ssubCUSTOMER_DATA:SAPLZACMFG_SCREEN_GRP_CTRL:0010/subSS_HD_1:SAPLZACMFG_SCREEN_GRP_CTRL:0100/ssubSS_TEXTS:SAPLZACMFG_SCREEN_GRP_CTRL:0300/rad<SG_DYNPRO>-SCREEN_ELEMENT22
+						SAP ElementFocus ElementId wnd[0]/usr/subSCREEN:SAPLWB2A:0251/tabsSTRIPT_AH_HEAD/tabpAOHD/ssubHEADER_SUB:SAPLWB2A:0145/subTRADE:SAPLWB2B_SCREEN_HANDLING:0101/subCUSTOMER_DATA:SAPLWB2B_SCREEN_HANDLING:8001/ssubCUSTOMER_DATA:SAPLZACMFG_SCREEN_GRP_CTRL:0010/subSS_HD_1:SAPLZACMFG_SCREEN_GRP_CTRL:0100/ssubSS_TEXTS:SAPLZACMFG_SCREEN_GRP_CTRL:0300/rad<SG_DYNPRO>-SCREEN_ELEMENT22
+					DefineVariable as "fixationMatched" with the value "true"
+				end
+				if ("<<<fixationMatched>>>" -ne "true")
+					DefineVariable as "rulesHadError" with the value "true"
+					DefineVariable as "rulesErrorDetail" with the value "<<<rulesErrorDetail>>> | Fixation: unrecognized value <<<rulesContractFormFixation>>>"
+				end
+			catch as ex
+				DefineVariable as "rulesHadError" with the value "true"
+				DefineVariable as "rulesErrorDetail" with the value "<<<rulesErrorDetail>>> | Fixation: <<<ex>>>"
+			end
+		end
+
+		if ("<<<rulesHadError>>>" -eq "true")
+			DefineVariable as "lastSAPError" with the value "Rules errors:<<<rulesErrorDetail>>>"
+		end
 		#%endregion
+		end
 
 
 		#%region Finalize / Save ──────────────────────────────────────────────
 		DefineVariable as "currentStep" with the value "Finalize/Save"
-		SAP ClickButton id wnd[0]/tbar[0]/btn[11]
-		SAP ClickButton id wnd[0]/tbar[0]/btn[15]
-		#%endregion
-
-
-		#%region MARK SUCCESS IN EXCEL ───────────────────────────────────────────
-		Excel Write "Success" in WSName row <<<Contador>>> and column <<<statusCol>>>
-		successCount++
-
-		## Audit log in Processed sheet
-		GetCurrentDate format={"MM/dd/yyyy HH:mm:ss" en} and save as NowHuman
-		Excel Append from WSProcessed at [1 ="<<<Contador>>>",2 ="SUCCESS",3 ="<<<NowHuman>>>",4 ="<<<runId>>>"]
-		Excel Save WBName
-		#%endregion
+		if ("<<<rulesHadError>>>" -ne "true")
+				SAP ClickButton id wnd[0]/tbar[0]/btn[11]
+				RunScript CheckSAPStatus
+				SAP ClickButton id wnd[0]/tbar[0]/btn[15]
+		end
+		if ("<<<rulesHadError>>>" -eq "true")
+			DefineVariable as "rowOutcome" with the value "rules_fail"
+			DefineVariable as "errorDetail" with the value "<<<lastSAPError>>>"
+		else
+			DefineVariable as "rowOutcome" with the value "success"
+		end
 
 	catch as ex
-		#%region FAILURE HANDLING ────────────────────────────────────────────
-		## Determine error detail: prefer SAP root cause if available, otherwise use exception
+			#%region FAILURE HANDLING ────────────────────────────────────────────
+			DefineVariable as "rowOutcome" with the value "exception_fail"
 		if ("<<<lastSAPError>>>" -ne "")
 			DefineVariable as "errorDetail" with the value "<<<currentStep>>>: <<<lastSAPError>>>"
 		else
-			DefineVariable as "errorDetail" with the value "<<<currentStep>>>: <<<ex>>>"
+			if ("<<<ex>>>" -ne "")
+				DefineVariable as "errorDetail" with the value "<<<currentStep>>>: <<<ex>>>"
+			else
+				DefineVariable as "errorDetail" with the value "<<<currentStep>>>: SAP status could not be read (screen may have changed)"
+			end
 		end
-
-		## Preserve evidence and mark the row as failed so it can be reviewed or retried intentionally.
-		Titanium CaptureImage and save as <<<evidenceDir>>>\SAP_Fail_Row<<<Contador>>>_<<<runId>>>.png
-
-		Excel Write "Failed" in WSName row <<<Contador>>> and column <<<statusCol>>>
-		Excel Write "<<<errorDetail>>>" in WSName row <<<Contador>>> and column <<<detailsCol>>>
-		failCount++
-
-		## Audit log in Processed sheet
-		GetCurrentDate format={"MM/dd/yyyy HH:mm:ss" en} and save as NowHuman
-		Excel Append from WSProcessed at [1 ="<<<Contador>>>",2 ="FAIL",3 ="<<<NowHuman>>>",4 ="<<<runId>>>",5 ="<<<errorDetail>>>"]
-		Excel Save WBName
-
-		## Reset transaction state before next row
-		try
-			SAP CloseTrans
-		catch
-			## Ignore - StartTransaction will reset anyway
-		end
-
-		## Continue-on-error: log failure and proceed to next row
 		#%endregion
 	end
 	#%endregion
+	## end if rowOutcome == pending
+	end
+
+		#%region SINGLE OUTCOME HANDLER ───────────────────────────────────────────
+		if ("<<<rowOutcome>>>" -eq "success")
+			Excel Write "Success" in WSName row <<<rowNum>>> and column <<<statusCol>>>
+			successCount++
+			DefineVariable as "successRowNums" with the value "<<<successRowNums>>> <<<rowNum>>>,"
+			GetCurrentDate format={"MM/dd/yyyy HH:mm:ss" en} and save as NowHuman
+			Excel Append from WSProcessed at [1 ="<<<rowNum>>>",2 ="SUCCESS",3 ="<<<NowHuman>>>",4 ="<<<runId>>>"]
+			Excel Save WBName
+		end
+		if ("<<<rowOutcome>>>" -ne "success")
+			DefineVariable as "rowCategory" with the value "VALIDATION"
+			if ("<<<rowOutcome>>>" -eq "rules_fail")
+				DefineVariable as "rowCategory" with the value "RULES ERROR"
+			end
+			if ("<<<rowOutcome>>>" -eq "exception_fail")
+				DefineVariable as "rowCategory" with the value "SAP ERROR"
+			end
+			DefineVariable as "htmlFailRows" with the value "<<<htmlFailRows>>><tr><td>Row <<<rowNum>>></td><td><<<rowCategory>>></td><td><<<errorDetail>>></td></tr>"
+			File NewFolder in "<<<runEvidenceDir>>>" with the name "Row_<<<rowNum>>>"
+			Titanium CaptureImage and save as <<<runEvidenceDir>>>\Row_<<<rowNum>>>\SAP_Fail_Row<<<rowNum>>>.png
+			Excel Write "Failed" in WSName row <<<rowNum>>> and column <<<statusCol>>>
+			Excel Write "<<<errorDetail>>>" in WSName row <<<rowNum>>> and column <<<detailsCol>>>
+			failCount++
+			GetCurrentDate format={"MM/dd/yyyy HH:mm:ss" en} and save as NowHuman
+			Excel Append from WSProcessed at [1 ="<<<rowNum>>>",2 ="FAIL",3 ="<<<NowHuman>>>",4 ="<<<runId>>>",5 ="<<<errorDetail>>>"]
+			Excel Save WBName
+			if ("<<<rowOutcome>>>" -ne "validation_fail")
+				try
+						SAP CloseTrans
+				catch
+					## Ignore - StartTransaction will reset anyway
+				end
+			end
+		end
+		#%endregion
+	## end if shouldProcessRow
 	end
 }
 #%endregion
@@ -625,9 +719,11 @@ foreach rowNum in RowsToProcess {
 #%region CLEANUP ─────────────────────────────────────────────────────────────
 ## Send summary email
 if (<<<failCount>>> -gt 0)
-	SendMail with subject "SAP Bot <<<runId>>> - Completed with failures" to "<<<notifyEmail>>>" with body "Run <<<runId>>> finished. <<<successCount>>> contracts succeeded, <<<failCount>>> failed. Check Template sheet Status and Details columns for specifics."
+	DefineVariable as "htmlBody" with the value "<html><body><h2>SAP Bot - <<<runId>>></h2><p><<<successCount>>> succeeded | <<<failCount>>> failed</p><h3>Failures</h3><table border='1' cellpadding='5' style='border-collapse:collapse'><tr><th>Row</th><th>Category</th><th>Error Detail</th></tr><<<htmlFailRows>>></table><h3>Succeeded Rows</h3><p><<<successRowNums>>></p></body></html>"
+	SendMail with subject "SAP Bot <<<runId>>> - Completed with failures" to "<<<notifyEmail>>>" with htmlbody "<<<htmlBody>>>"
 else
-	SendMail with subject "SAP Bot <<<runId>>> - All contracts created" to "<<<notifyEmail>>>" with body "Run <<<runId>>> finished successfully. <<<successCount>>> contracts created with no errors."
+	DefineVariable as "htmlBody" with the value "<html><body><h2>SAP Bot - <<<runId>>></h2><p>All <<<successCount>>> contracts created successfully.</p><h3>Succeeded Rows</h3><p><<<successRowNums>>></p></body></html>"
+	SendMail with subject "SAP Bot <<<runId>>> - All contracts created" to "<<<notifyEmail>>>" with htmlbody "<<<htmlBody>>>"
 end
 
 Excel Save WBName and close

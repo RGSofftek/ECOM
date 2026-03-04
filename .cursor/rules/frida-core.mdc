@@ -57,6 +57,10 @@ try ... catch ... end
   - `3/3/2026 12:00:22 PM - #%region FAILURE HANDLING ──────────────────────────────────────────── : Running`
 - When designing scripts, think of these comments and regions as **checkpoints**: they should make both the script and the execution log easier to navigate when debugging.
 
+### Indentation
+
+Indent the body of every control flow block by one tab relative to its parent: `if`/`else` body one tab deeper than the `if`, `try`/`catch` body one tab deeper than the `try`, loop body one tab deeper than `for`/`foreach`/`while`. Add closing comments on `end` statements for deeply nested blocks (3+ levels), e.g. `## end if rowOutcome == pending`. Missing indentation has masked critical bugs (e.g. an outcome handler trapped inside a conditional so validation failures were never logged).
+
 ## Variables
 
 **Global vs Local:**
@@ -76,16 +80,7 @@ DefineVariable type "List" as "MyList"
 DefineVariable type "Date" as "myDate" with the value "2024-01-15"
 ```
 
-**String interpolation requires quotes:**
-
-```
-## Correct
-"<<<var>>>"
-"<<<path>>>\file.txt"
-
-## Wrong - missing quotes
-<<<var>>>
-```
+**Variable interpolation syntax:** Use `<<<var>>>` (runtime), `<<Var>>` (global), or `{var}` (alternative reference). Whether quotes are required depends on the instruction: quotes **are required** inside comparison operators (e.g. `if ("<<<var>>>" -eq "value")`) and for `Text` parameters (e.g. `SAP WriteText ... Text "<<<value>>>"`). Many `save as` and path parameters accept bare interpolation per the instruction's documented syntax - consult the specific reader doc when in doubt.
 
 **List indexing:**
 
@@ -175,6 +170,51 @@ foreach item in myList {
 }
 ```
 
+## RunScript as Reusable Functions
+
+FRIDA has no subroutines, but `RunScript <Script>.txt` runs a script file within the same process, sharing all variables bidirectionally. Use this to eliminate repeated instruction blocks:
+
+- Create a `.txt` file in the same process with the reusable logic.
+- Call it from the main script with `RunScript <Script>` or `RunScript <Script>.txt`.
+- The sub-script reads and writes the same variables as the caller.
+
+```
+## Sub-script (e.g. CheckSAPStatus.txt): reads status bar, updates lastSAPError if non-success
+SAP GetStatusInfo as StatInfo
+DefineVariable as "sapStatusType" with the value "<<<StatInfo[2]>>>"
+if ("<<<sapStatusType>>>" -ne "")
+    if ("<<<sapStatusType>>>" -ne "S")
+        DefineVariable as "lastSAPError" with the value "SAP(<<<StatInfo[2]>>>): <<<StatInfo[0]>>>"
+    end
+end
+
+## Main script - call site
+SAP SendKey 0
+RunScript CheckSAPStatus
+```
+
+Prefer `RunScript` over inline duplication when the same block appears **3+ times**.
+
+## List-Based Validation / Detection
+
+When checking multiple variables for the same condition (empty, non-empty, matching), prefer building a list and iterating over it instead of N separate `if` blocks:
+
+```
+DefineVariable type "List" as "checks"
+AddValueToList "checks" value "FieldName,<<<fieldValue>>>"
+## ... add more pairs ...
+DefineVariable as "result" with the value ""
+foreach item in checks {
+    ApplyRegex ".+?(?=,)" to the string "<<<item>>>" and save as "name"
+    ApplyRegex "(?<=,).*$" to the string "<<<item>>>" and save as "val"
+    if ("<<<val>>>" -eq "")
+        DefineVariable as "result" with the value "<<<result>>> <<<name>>>,"
+    end
+}
+```
+
+Use cases: mandatory-field validation, "has any rule" detection, and similar multi-field checks. Adding a new field is one `AddValueToList` line.
+
 ## SendMail
 
 **Avoid special characters** in subject/body that may break the lexer - use hyphen `-` instead of en dash `–`. See `docs/mix-reader.md` for full syntax.
@@ -192,3 +232,5 @@ foreach item in myList {
 - **No indirect variable dereferencing** (variable name stored in another variable) unless confirmed
 - **Avoid nested quotes in selectors** that cause lexical errors
 - **Do not introduce `systemnotify`** unless the user has explicitly requested its use for this automation
+- **Never call `Finish` without notifying first** - `Finish` terminates immediately and skips all subsequent code including CLEANUP regions. Send any notification (email, Excel save) before calling `Finish`. Wrong: `catch as ex` then `Finish "..."` only. Correct: build and send notification (e.g. `SendMail`), then `Excel Save WB and close`, then `Finish "..."`.
+- **Naive decimal replacement** - When converting between number formats (e.g. US `1,234.56` to SAP `1234,56`), always strip thousands separators first, then replace the decimal separator. Wrong: `ReplaceFromVariable {var} this {.} for {,}` only (turns `1,234.56` into `1,234,56`). Correct: `ReplaceFromVariable {var} this {,} for {}` then `ReplaceFromVariable {var} this {.} for {,}`.

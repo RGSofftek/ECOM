@@ -1,0 +1,11 @@
+## Sub-script: reads SAP status bar and updates lastSAPError if non-success.
+## Caller must have lastSAPError defined. Variables are shared via RunScript.
+SAP GetStatusInfo as StatInfo
+DefineVariable as "sapStatusMsg" with the value "<<<StatInfo[0]>>>"
+DefineVariable as "sapStatusId" with the value "<<<StatInfo[1]>>>"
+DefineVariable as "sapStatusType" with the value "<<<StatInfo[2]>>>"
+if ("<<<sapStatusType>>>" -ne "")
+	if ("<<<sapStatusType>>>" -ne "S")
+		DefineVariable as "lastSAPError" with the value "SAP(<<<sapStatusType>>>) [<<<sapStatusId>>>]: <<<sapStatusMsg>>>"
+	end
+end

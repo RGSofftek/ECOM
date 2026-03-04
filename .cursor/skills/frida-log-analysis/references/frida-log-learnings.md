@@ -44,6 +44,22 @@ If a known pattern matches, use the confirmed root cause and resolution instead 
 - **Actual root cause**: Excel workbook could not be opened (file path wrong, file missing, file locked, or corrupted).
 - **Resolution**: Verify the `excelFile` path, ensure the file exists and is accessible, and check that no other process is locking or corrupting the workbook before running the FRIDA process.
 
+### Stale "Fill required fields" when GetStatusInfo throws (control not found)
+- **First seen**: 2026-03-03
+- **Log excerpt**:
+  ```text
+  SAP ClickButton id wnd[0]/tbar[1]/btn[8] : Success
+  SAP GetStatusInfo as StatInfo : Running
+  error: GetStatusInfo as StatInfo : System.Runtime.InteropServices.COMException (0x0000026B): The control could not be found by id.
+  SAP GetStatusInfo as StatInfo :  (Line: 509) : Error
+  ...
+  If Evaluation Expression : ("SAP(E) [ZACM000]: Fill required fields" -ne "")
+  If Result : True
+  DefineVariable as "errorDetail" with the value "Price Details (BID): SAP(E) [ZACM000]: Fill required fields"
+  ```
+- **Actual root cause**: The **failing** instruction is `GetStatusInfo` (after clicking btn[8]): the status bar control could not be found (screen may have changed, e.g. dialog or different layout). The message "Fill required fields" is **stale** — it was set by an **earlier** successful GetStatusInfo in the same row (after BID WriteText + SendKey 0). The catch block uses `lastSAPError` when non-empty, so it reports that old message instead of the real failure (control not found). The Excel field is not missing; the script is misreporting.
+- **Resolution**: In the script, clear `lastSAPError` before the GetStatusInfo that runs after a button click (e.g. before line 509), and in the catch when both `lastSAPError` and `ex` are empty, set errorDetail to a message like "SAP status could not be read (screen may have changed)". So the reported error reflects the actual failure instead of a previous SAP message.
+
 <!--
 Template for new entries:
 

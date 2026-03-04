@@ -80,5 +80,8 @@ When you discover a new **structural** pattern in logs (not just a single projec
    - How it should influence scanning or classification.
 3. Keep examples short to avoid bloating this file.
 
+**RunScript (sub-scripts)**  
+Scripts can call sub-scripts via `RunScript <name>.txt`. In the log this appears as an entry `RunScript <name> : Running` (then `Success` or `Error`), and the sub-script’s instructions are emitted **inline** in the same log. When tracing a failure, if the failing instruction is not found in the main script near the reported line number, look for a **preceding** `RunScript <name>` log entry; the failing line may belong to that sub-script. Open the corresponding sub-script file (e.g. `<name>.txt`) to understand and fix the logic.
+
 Project-specific, user-confirmed diagnoses should be added to `frida-log-learnings.md`, not here.
 
