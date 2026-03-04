@@ -13,14 +13,14 @@ from __future__ import annotations
 
 import argparse
 import difflib
-import glob as glob_module
 import json
 import re
 import sys
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Callable
+from collections import Counter
 
 # -----------------------------------------------------------------------------
 # Constants
@@ -56,7 +56,7 @@ class Config:
     per_file_ignores: dict[str, list[str]] = field(default_factory=dict)
 
     @classmethod
-    def load(cls, path: Path | None = None) -> "Config":
+    def load(cls, path: Path | None = None) -> Config:
         if path is None:
             cwd = Path.cwd()
             for p in [cwd / ".fridalintrc", cwd / ".frida-lintrc"]:
@@ -204,9 +204,9 @@ BLOCK_OPENERS = {
 
 # Regex patterns for line classification
 RE_BLANK = re.compile(r"^\s*$")
-RE_REGION_OPEN = re.compile(r"^\s*#%region\s", re.IGNORECASE)
+RE_REGION_OPEN = re.compile(r"^\s*#%region(\s|$)", re.IGNORECASE)
 RE_REGION_CLOSE = re.compile(r"^\s*#%endregion\s*$", re.IGNORECASE)
-RE_COMMENT = re.compile(r"^\s*(##|#\*|#\?|#!)(\S|$)", re.IGNORECASE)
+RE_COMMENT = re.compile(r"^\s*(##|#\*|#\?|#!)", re.IGNORECASE)
 RE_END = re.compile(r"^\s*end\s*$", re.IGNORECASE)
 RE_CLOSE_BRACE = re.compile(r"^\s*\}\s*$")
 RE_IF = re.compile(r"^\s*if\s*\(")
@@ -235,6 +235,23 @@ RE_BRACE_VAR = re.compile(r"\{([A-Za-z_][A-Za-z0-9_]*)\}")
 RE_GLOBAL_DOC = re.compile(r"^\s*##\s*<<([^>]+)>>")
 RE_RUNSCRIPT = re.compile(r"^\s*RunScript\s+(\S+)", re.IGNORECASE)
 RE_CATCH_AS = re.compile(r"^\s*catch\s+as\s+(\w+)", re.IGNORECASE)
+
+
+def _block_stack_per_line(records: list[LineRecord]) -> list[list[str]]:
+    """Return a list (one per record) of block-keyword stacks at that point."""
+    stack: list[str] = []
+    result: list[list[str]] = []
+    for r in records:
+        if r.line_type == LineType.block_open and r.block_keyword in BLOCK_OPENERS:
+            if r.block_keyword in ("else", "catch", "case", "default"):
+                if stack and BLOCK_OPENERS.get(stack[-1]) == "end":
+                    stack.pop()
+            stack.append(r.block_keyword)
+        elif r.line_type == LineType.block_close:
+            if stack:
+                stack.pop()
+        result.append(list(stack))
+    return result
 
 
 def classify_line(stripped: str) -> tuple[LineType, str]:
@@ -272,7 +289,7 @@ def classify_line(stripped: str) -> tuple[LineType, str]:
         return LineType.comment, ""
     # Instruction: starts with a known reader prefix
     for prefix in READER_PREFIXES:
-        if stripped.startswith(prefix) or stripped.lstrip().startswith(prefix):
+        if stripped.lstrip().startswith(prefix):
             return LineType.instruction, ""
     # Variable ops: DefineVariable, AddValueToList, MathOperation, var++, etc.
     if re.search(r"DefineVariable|AddValueToList|AddVarToList|MathOperation|CountItems|ApplyRegex|ReplaceFromVariable|TrimList|RemoveDuplicatesInList|SplitIntoList", stripped, re.IGNORECASE):
@@ -284,17 +301,29 @@ def classify_line(stripped: str) -> tuple[LineType, str]:
 
 @dataclass
 class ParseContext:
+    """State accumulated during parsing of a FRIDA script."""
+    # Stack of (keyword, line_no, expected_closer) for open blocks.
     block_stack: list[tuple[str, int, str]] = field(default_factory=list)
+    # Line numbers where #%region blocks opened (for unmatched-region detection).
     region_stack: list[int] = field(default_factory=list)
+    # Map of local variable name -> list of line numbers where it was defined.
     declared: dict[str, list[int]] = field(default_factory=lambda: {})
+    # Map of local variable name -> list of line numbers where it was used.
     used: dict[str, list[int]] = field(default_factory=lambda: {})
+    # Globals of the form <<Var>> seen anywhere in the script.
     globals_used: set[str] = field(default_factory=set)
+    # Globals that are documented in the header comment block.
     globals_documented: set[str] = field(default_factory=set)
+    # Names passed to RunScript so we can validate existence.
     run_scripts: list[str] = field(default_factory=list)
+    # True while we are still in the top-of-file header doc region.
     in_header_doc: bool = True
+    # Excel workbook state flags.
     excel_wb_opened: bool = False
     excel_wb_closed: bool = False
+    # Variables that are targets of save-as operations (GetHome, GetCurrentDate, etc.).
     save_as_vars: set[str] = field(default_factory=set)
+    # Loop iteration variables from foreach.
     loop_vars: set[str] = field(default_factory=set)
 
 
@@ -302,23 +331,25 @@ def parse_file(lines: list[str], path: Path) -> tuple[list[LineRecord], ParseCon
     records: list[LineRecord] = []
     ctx = ParseContext()
     noqa_block_stack: list[set[str]] = []
-    header_end_line = 0
     non_comment_non_blank = 0
 
     for i, raw in enumerate(lines):
         line_no = i + 1
         stripped = raw.rstrip("\r\n")
+
+        # Collect documented globals (## <<Var>>) regardless of line type.
+        for m in RE_GLOBAL_DOC.finditer(stripped):
+            ctx.globals_documented.add(m.group(1))
+
         line_type, block_kw = classify_line(stripped)
         noqa_inline = parse_noqa_inline(stripped)
 
-        if line_type == LineType.region_open:
-            noqa_codes = parse_noqa_begin(stripped)
-            if noqa_codes:
-                noqa_block_stack.append(noqa_codes)
-        elif line_type == LineType.region_close:
-            noqa_codes = parse_noqa_end(stripped)
-            if noqa_codes and noqa_block_stack:
-                noqa_block_stack.pop()
+        noqa_begin = parse_noqa_begin(stripped)
+        if noqa_begin:
+            noqa_block_stack.append(noqa_begin)
+        noqa_end = parse_noqa_end(stripped)
+        if noqa_end and noqa_block_stack:
+            noqa_block_stack.pop()
 
         noqa_codes = noqa_inline or (noqa_block_stack[-1] if noqa_block_stack else set())
 
@@ -338,6 +369,7 @@ def parse_file(lines: list[str], path: Path) -> tuple[list[LineRecord], ParseCon
                 if ctx.block_stack and ctx.block_stack[-1][2] == "end":
                     ctx.block_stack.pop()
                 depth = len(ctx.block_stack)
+                ctx.block_stack.append((block_kw, line_no, BLOCK_OPENERS[block_kw]))
                 if block_kw == "catch":
                     m = RE_CATCH_AS.match(stripped)
                     if m:
@@ -359,24 +391,23 @@ def parse_file(lines: list[str], path: Path) -> tuple[list[LineRecord], ParseCon
         if line_type == LineType.variable_op or line_type == LineType.instruction:
             if ctx.in_header_doc and non_comment_non_blank > 20:
                 ctx.in_header_doc = False
-            if line_type == LineType.variable_op or line_type == LineType.instruction:
-                m = RE_DEFINE_VAR.search(stripped)
-                if m:
-                    name = m.group(1)
-                    ctx.declared.setdefault(name, []).append(line_no)
-                for m in RE_SAVE_AS.finditer(stripped):
-                    ctx.save_as_vars.add(m.group(1).strip())
-                for m in RE_SAVE_AS_BARE.finditer(stripped):
-                    ctx.save_as_vars.add(m.group(1))
-                for m in RE_SAVE_VALUE_AS.finditer(stripped):
-                    ctx.save_as_vars.add(m.group(1).strip())
-                for m in RE_GETHOME_AS.finditer(stripped):
-                    ctx.save_as_vars.add(m.group(1))
-                for m in RE_GETCURRENTDATE_SAVE.finditer(stripped):
-                    ctx.save_as_vars.add(m.group(1))
-                if line_type == LineType.variable_op:
-                    for m in RE_FOREACH_VAR.finditer(stripped):
-                        ctx.loop_vars.add(m.group(1))
+            m = RE_DEFINE_VAR.search(stripped)
+            if m:
+                name = m.group(1)
+                ctx.declared.setdefault(name, []).append(line_no)
+            for m in RE_SAVE_AS.finditer(stripped):
+                ctx.save_as_vars.add(m.group(1).strip())
+            for m in RE_SAVE_AS_BARE.finditer(stripped):
+                ctx.save_as_vars.add(m.group(1))
+            for m in RE_SAVE_VALUE_AS.finditer(stripped):
+                ctx.save_as_vars.add(m.group(1).strip())
+            for m in RE_GETHOME_AS.finditer(stripped):
+                ctx.save_as_vars.add(m.group(1))
+            for m in RE_GETCURRENTDATE_SAVE.finditer(stripped):
+                ctx.save_as_vars.add(m.group(1))
+            if line_type == LineType.variable_op:
+                for m in RE_FOREACH_VAR.finditer(stripped):
+                    ctx.loop_vars.add(m.group(1))
             for m in RE_RUNTIME_VAR.finditer(stripped):
                 ctx.used.setdefault(m.group(1), []).append(line_no)
             for m in RE_GLOBAL_VAR.finditer(stripped):
@@ -384,8 +415,6 @@ def parse_file(lines: list[str], path: Path) -> tuple[list[LineRecord], ParseCon
                 ctx.globals_used.add(g)
                 if ctx.in_header_doc:
                     ctx.globals_documented.add(g)
-            for m in RE_GLOBAL_DOC.finditer(stripped):
-                ctx.globals_documented.add(m.group(1))
             if "LoadWBook" in stripped or "NewWB" in stripped:
                 ctx.excel_wb_opened = True
             if "Save" in stripped and "close" in stripped.lower():
@@ -423,7 +452,7 @@ def parse_file(lines: list[str], path: Path) -> tuple[list[LineRecord], ParseCon
 # -----------------------------------------------------------------------------
 
 
-def resolve_files(paths: list[str], follow_scripts: bool = False, script_dir: Path | None = None) -> list[Path]:
+def resolve_files(paths: list[str], follow_scripts: bool = False) -> list[Path]:
     seen: set[Path] = set()
     result: list[Path] = []
     cwd = Path.cwd()
@@ -459,6 +488,7 @@ def resolve_files(paths: list[str], follow_scripts: bool = False, script_dir: Pa
 # -----------------------------------------------------------------------------
 
 def rule_e001_continue(records: list[LineRecord], ctx: ParseContext) -> list[Diagnostic]:
+    """Flag use of 'continue', which does not exist in FRIDA."""
     out: list[Diagnostic] = []
     for r in records:
         if r.line_type != LineType.instruction and r.line_type != LineType.variable_op:
@@ -475,24 +505,29 @@ def rule_e001_continue(records: list[LineRecord], ctx: ParseContext) -> list[Dia
 
 
 def rule_e002_bare_bool(records: list[LineRecord], ctx: ParseContext) -> list[Diagnostic]:
+    """Detect bare booleans in if() conditions (must use string comparison)."""
     out: list[Diagnostic] = []
     bare = re.compile(r"if\s*\(\s*<<<([^>]+)>>>\s*\)")
+    comparison_ops = {"-eq", "-ne", "-gt", "-lt", "-like", "-match"}
     for r in records:
         if r.line_type != LineType.block_open or r.block_keyword != "if":
             continue
         m = bare.search(r.stripped)
-        if m and "-eq" not in r.stripped and "-ne" not in r.stripped and "-gt" not in r.stripped and "-lt" not in r.stripped and "-like" not in r.stripped and "-match" not in r.stripped:
-            if "E002" in r.noqa_codes or "ALL" in r.noqa_codes:
-                continue
-            var = m.group(1)
-            fix = f'if ("<<<{var}>>>" -eq "true")'
-            new_line = bare.sub(fix, r.stripped, count=1)
-            out.append(Diagnostic(
-                file="", line=r.line_no, col=1, code="E002",
-                message="Bare boolean in if(); use string comparison e.g. -eq \"true\"",
-                severity="error", fixable=True, fix_kind="safe",
-                fix_replacement=[new_line],
-            ))
+        if not m:
+            continue
+        if any(op in r.stripped for op in comparison_ops):
+            continue
+        if "E002" in r.noqa_codes or "ALL" in r.noqa_codes:
+            continue
+        var = m.group(1)
+        fix = f'if ("<<<{var}>>>" -eq "true")'
+        new_line = bare.sub(fix, r.stripped, count=1)
+        out.append(Diagnostic(
+            file="", line=r.line_no, col=1, code="E002",
+            message="Bare boolean in if(); use string comparison e.g. -eq \"true\"",
+            severity="error", fixable=True, fix_kind="safe",
+            fix_replacement=[new_line],
+        ))
     return out
 
 
@@ -517,6 +552,9 @@ def rule_e004_wrong_closer(records: list[LineRecord], ctx: ParseContext) -> list
     stack: list[tuple[str, int, str]] = []
     for r in records:
         if r.line_type == LineType.block_open and r.block_keyword in BLOCK_OPENERS:
+            if r.block_keyword in ("else", "catch", "case", "default"):
+                if stack and stack[-1][2] == "end":
+                    stack.pop()
             stack.append((r.block_keyword, r.line_no, BLOCK_OPENERS[r.block_keyword]))
         elif r.line_type == LineType.block_close:
             if r.block_keyword == "end":
@@ -547,6 +585,9 @@ def rule_e005_unbalanced(records: list[LineRecord], ctx: ParseContext) -> list[D
     stack: list[tuple[str, int, str]] = []
     for r in records:
         if r.line_type == LineType.block_open and r.block_keyword in BLOCK_OPENERS:
+            if r.block_keyword in ("else", "catch", "case", "default"):
+                if stack and stack[-1][2] == "end":
+                    stack.pop()
             stack.append((r.block_keyword, r.line_no, BLOCK_OPENERS[r.block_keyword]))
         elif r.line_type == LineType.block_close:
             if stack:
@@ -696,14 +737,11 @@ def rule_w004_systemnotify(records: list[LineRecord], ctx: ParseContext) -> list
 
 def rule_w005_finish_in_loop(records: list[LineRecord], ctx: ParseContext) -> list[Diagnostic]:
     out: list[Diagnostic] = []
-    stack: list[str] = []
-    for r in records:
-        if r.line_type == LineType.block_open and r.block_keyword in ("for", "foreach", "while"):
-            stack.append(r.block_keyword)
-        elif r.line_type == LineType.block_close and stack:
-            stack.pop()
+    stacks = _block_stack_per_line(records)
+    for r, stack in zip(records, stacks):
         if "Finish " in r.stripped or re.match(r"^\s*Finish\s+", r.stripped):
-            if stack and ("W005" not in r.noqa_codes and "ALL" not in r.noqa_codes):
+            in_loop = any(kw in ("for", "foreach", "while") for kw in stack)
+            if in_loop and ("W005" not in r.noqa_codes and "ALL" not in r.noqa_codes):
                 out.append(Diagnostic(
                     file="", line=r.line_no, col=1, code="W005",
                     message="Finish inside loop; consider log-and-continue for row-level errors",
@@ -714,17 +752,17 @@ def rule_w005_finish_in_loop(records: list[LineRecord], ctx: ParseContext) -> li
 
 def rule_w006_sap_outside_try(records: list[LineRecord], ctx: ParseContext) -> list[Diagnostic]:
     out: list[Diagnostic] = []
-    stack: list[str] = []
-    for r in records:
-        if r.line_type == LineType.block_open:
-            stack.append(r.block_keyword)
-        elif r.line_type == LineType.block_close and stack:
-            stack.pop()
-        if r.stripped.strip().startswith("SAP ") and "try" not in stack:
+    stacks = _block_stack_per_line(records)
+    for r, stack in zip(records, stacks):
+        if not r.stripped.strip().startswith("SAP "):
+            continue
+        in_loop = any(kw in ("for", "foreach", "while") for kw in stack)
+        in_protected = any(kw in ("try", "catch") for kw in stack)
+        if in_loop and not in_protected:
             if "W006" not in r.noqa_codes and "ALL" not in r.noqa_codes:
                 out.append(Diagnostic(
                     file="", line=r.line_no, col=1, code="W006",
-                    message="SAP instruction outside try/catch block",
+                    message="SAP instruction inside loop but outside try/catch block",
                     severity="warning",
                 ))
     return out
@@ -777,45 +815,67 @@ def rule_w008_sendmail_chars(records: list[LineRecord], ctx: ParseContext) -> li
 
 def rule_w009_no_closetrans_in_catch(records: list[LineRecord], ctx: ParseContext) -> list[Diagnostic]:
     out: list[Diagnostic] = []
-    in_loop = 0
-    in_catch = False
-    catch_has_closetrans = False
-    catch_start = 0
-    for r in records:
-        if r.line_type == LineType.block_open:
-            if r.block_keyword in ("for", "foreach", "while"):
-                in_loop += 1
-            elif r.block_keyword == "catch":
-                in_catch = True
-                catch_has_closetrans = False
-                catch_start = r.line_no
-        elif r.line_type == LineType.block_close:
-            if r.block_keyword == "end" and in_catch:
-                if in_loop > 0 and not catch_has_closetrans:
+    stacks = _block_stack_per_line(records)
+    i = 0
+    while i < len(records):
+        r = records[i]
+        stack = stacks[i]
+        if r.line_type == LineType.block_open and r.block_keyword == "catch":
+            catch_start = r.line_no
+            catch_depth = len(stack)
+            in_loop_at_catch = any(kw in ("for", "foreach", "while") for kw in stack)
+            catch_has_closetrans = False
+            has_sap_instruction = False
+            j = i + 1
+            while j < len(records):
+                if len(stacks[j]) < catch_depth:
+                    break
+                text = records[j].stripped
+                if "CloseTrans" in text:
+                    catch_has_closetrans = True
+                if text.strip().startswith("SAP "):
+                    has_sap_instruction = True
+                j += 1
+            # Only warn for catch blocks that are both inside a loop and handle
+            # transactional SAP work. Small inner catches that only set flags or
+            # strings (no SAP calls) are ignored.
+            if in_loop_at_catch and has_sap_instruction and not catch_has_closetrans:
+                if "W009" not in r.noqa_codes and "ALL" not in r.noqa_codes:
                     out.append(Diagnostic(
                         file="", line=catch_start, col=1, code="W009",
                         message="Catch inside loop without SAP CloseTrans (transaction recovery)",
                         severity="warning",
                     ))
-                in_catch = False
-            elif r.block_keyword == "}" and in_loop > 0:
-                in_loop -= 1
-        if in_catch and "CloseTrans" in r.stripped:
-            catch_has_closetrans = True
+            i = j
+        else:
+            i += 1
     return out
 
 
 def rule_w010_unmatched_region(records: list[LineRecord], ctx: ParseContext) -> list[Diagnostic]:
     out: list[Diagnostic] = []
-    if ctx.region_stack:
-        for r in records:
-            if r.line_type == LineType.region_open and r.line_no == ctx.region_stack[0]:
+    stack: list[int] = []
+    for r in records:
+        if r.line_type == LineType.region_open:
+            stack.append(r.line_no)
+        elif r.line_type == LineType.region_close:
+            if stack:
+                stack.pop()
+            else:
+                # Extra #%endregion without opener – treat as unmatched region as well.
                 out.append(Diagnostic(
                     file="", line=r.line_no, col=1, code="W010",
-                    message="Unmatched #%region (missing #%endregion)",
+                    message="Unmatched #%endregion (no corresponding #%region)",
                     severity="warning",
                 ))
-                break
+    if stack:
+        # Report the first unmatched opener.
+        line_no = stack[0]
+        out.append(Diagnostic(
+            file="", line=line_no, col=1, code="W010",
+            message="Unmatched #%region (missing #%endregion)",
+            severity="warning",
+        ))
     return out
 
 
@@ -828,7 +888,8 @@ def rule_w011_readcell_without_check(records: list[LineRecord], ctx: ParseContex
             var = m.group(1).strip()
             for j in range(i + 1, min(i + 20, len(records))):
                 if f"<<<{var}>>>" in records[j].stripped and "SAP " in records[j].stripped:
-                    if "if " not in " ".join(records[k].stripped for k in range(i + 1, j) if "if " in records[k].stripped):
+                    has_if_guard = any("if " in records[k].stripped for k in range(i + 1, j))
+                    if not has_if_guard:
                         if "W011" not in records[j].noqa_codes and "ALL" not in records[j].noqa_codes:
                             out.append(Diagnostic(
                                 file="", line=records[j].line_no, col=1, code="W011",
@@ -842,6 +903,8 @@ def rule_w011_readcell_without_check(records: list[LineRecord], ctx: ParseContex
 def rule_w012_sendkey_without_status(records: list[LineRecord], ctx: ParseContext) -> list[Diagnostic]:
     out: list[Diagnostic] = []
     for i, r in enumerate(records):
+        if r.line_type != LineType.instruction:
+            continue
         if "SAP SendKey 0" not in r.stripped and "SendKey 0" not in r.stripped:
             continue
         has_status = False
@@ -878,47 +941,30 @@ def rule_w013_empty_catch(records: list[LineRecord], ctx: ParseContext) -> list[
                 j += 1
             if len(content_lines) <= 1 and any("catch" in x.stripped for x in content_lines):
                 content_lines = []
-            if not content_lines and "W013" not in r.noqa_codes and "ALL" not in r.noqa_codes:
-                out.append(Diagnostic(
-                    file="", line=catch_line, col=1, code="W013",
-                    message="try block with empty catch (silently swallowing errors)",
-                    severity="warning",
-                ))
+            if not content_lines:
+                # Allow the documented SAP CloseTrans recovery pattern:
+                # try / SAP CloseTrans / catch / ## Ignore ...
+                # If the preceding non-comment, non-blank line before catch
+                # contains SAP CloseTrans, treat this as intentional and do
+                # not warn.
+                k = i - 1
+                allow_empty = False
+                while k >= 0:
+                    prev = records[k]
+                    if prev.line_type in (LineType.blank, LineType.comment):
+                        k -= 1
+                        continue
+                    if "SAP CloseTrans" in prev.stripped:
+                        allow_empty = True
+                    break
+                if not allow_empty and "W013" not in r.noqa_codes and "ALL" not in r.noqa_codes:
+                    out.append(Diagnostic(
+                        file="", line=catch_line, col=1, code="W013",
+                        message="try block with empty catch (silently swallowing errors)",
+                        severity="warning",
+                    ))
             i = j
         i += 1
-    return out
-
-
-def rule_w014_unbounded_concat(records: list[LineRecord], ctx: ParseContext) -> list[Diagnostic]:
-    return []
-
-
-def rule_w015_excel_save_between_writes(records: list[LineRecord], ctx: ParseContext) -> list[Diagnostic]:
-    return []
-
-
-def rule_w016_date_type_misuse(records: list[LineRecord], ctx: ParseContext) -> list[Diagnostic]:
-    return []
-
-
-def rule_w017_duplicate_define(records: list[LineRecord], ctx: ParseContext) -> list[Diagnostic]:
-    out: list[Diagnostic] = []
-    seen: dict[str, int] = {}
-    reported: set[str] = set()
-    for r in records:
-        m = RE_DEFINE_VAR.search(r.stripped)
-        if not m:
-            continue
-        name = m.group(1)
-        if name in seen and name not in reported:
-            if "W017" not in r.noqa_codes and "ALL" not in r.noqa_codes:
-                out.append(Diagnostic(
-                    file="", line=r.line_no, col=1, code="W017",
-                    message=f"Duplicate DefineVariable for '{name}' (previous at line {seen[name]})",
-                    severity="warning",
-                ))
-                reported.add(name)
-        seen[name] = r.line_no
     return out
 
 
@@ -955,47 +1001,52 @@ def rule_c003_large_block_without_region(records: list[LineRecord], ctx: ParseCo
     return []
 
 
-def rule_c005_inconsistent_naming(records: list[LineRecord], ctx: ParseContext) -> list[Diagnostic]:
-    return []
-
-
-def rule_c006_magic_number_in_for(records: list[LineRecord], ctx: ParseContext) -> list[Diagnostic]:
-    return []
-
-
-def rule_c007_if_opposite_if(records: list[LineRecord], ctx: ParseContext) -> list[Diagnostic]:
-    return []
-
-
-def rule_c008_region_dash_inconsistent(records: list[LineRecord], ctx: ParseContext) -> list[Diagnostic]:
-    return []
-
-
 def rule_s001_indentation(records: list[LineRecord], ctx: ParseContext, indent_str: str) -> list[Diagnostic]:
     out: list[Diagnostic] = []
+
+    def leading_indent_level(raw: str) -> int:
+        if indent_str == "	":
+            return len(raw) - len(raw.lstrip("	"))
+        level = 0
+        i = 0
+        step = len(indent_str)
+        while raw[i:i + step] == indent_str:
+            level += 1
+            i += step
+        return level
+
     for r in records:
-        if r.line_type == LineType.blank:
+        if r.line_type in (LineType.blank, LineType.comment, LineType.region_open, LineType.region_close):
             continue
         leading = r.raw[: len(r.raw) - len(r.raw.lstrip())]
-        expected = indent_str * r.depth
-        if leading != expected and r.stripped:
-            if "S001" not in r.noqa_codes and "ALL" not in r.noqa_codes:
-                out.append(Diagnostic(
-                    file="", line=r.line_no, col=1, code="S001",
-                    message=f"Expected indent level {r.depth}, found different",
-                    severity="style", fixable=True, fix_kind="safe",
-                    fix_replacement=[expected + r.stripped],
-                ))
+        actual_level = leading_indent_level(leading)
+        expected_level = r.depth
+
+        if actual_level == expected_level:
+            continue
+
+        if not r.stripped or "S001" in r.noqa_codes or "ALL" in r.noqa_codes:
+            continue
+
+        out.append(Diagnostic(
+            file="", line=r.line_no, col=1, code="S001",
+            message=f"Expected indent level {expected_level}, found {actual_level}",
+            severity="style", fixable=True, fix_kind="safe",
+            fix_replacement=[(indent_str * expected_level) + r.stripped.lstrip()],
+        ))
     return out
 
 
 def rule_s002_comment_space(records: list[LineRecord], ctx: ParseContext) -> list[Diagnostic]:
     out: list[Diagnostic] = []
     for r in records:
-        if not r.stripped.startswith("##") or r.stripped.startswith("#%") or r.stripped.startswith("#*") or r.stripped.startswith("#?") or r.stripped.startswith("#!"):
+        content = r.stripped.lstrip()
+        if not content.startswith("##"):
             continue
-        if re.match(r"^##\S", r.stripped):
-            fixed = re.sub(r"^(##)(\S)", r"\1 \2", r.stripped, count=1)
+        if content.startswith(("#%", "#*", "#?", "#!")):
+            continue
+        if re.match(r"^##[A-Za-z0-9<]", content):
+            fixed = re.sub(r"^(##)([A-Za-z0-9<])", r"\1 \2", content, count=1)
             if "S002" not in r.noqa_codes and "ALL" not in r.noqa_codes:
                 out.append(Diagnostic(
                     file="", line=r.line_no, col=1, code="S002",
@@ -1056,10 +1107,10 @@ def rule_c001_missing_globals_doc(records: list[LineRecord], ctx: ParseContext) 
 def rule_c004_checkpoint_before_start_transaction(records: list[LineRecord], ctx: ParseContext) -> list[Diagnostic]:
     out: list[Diagnostic] = []
     for i, r in enumerate(records):
-        if not re.search(r"SAP\s+StartTransaction\s+(\S+)", r.stripped, re.IGNORECASE):
-            continue
         m = re.search(r"SAP\s+StartTransaction\s+(\S+)", r.stripped, re.IGNORECASE)
-        tcode = m.group(1) if m else "?"
+        if not m:
+            continue
+        tcode = m.group(1)
         prev_comment = False
         for j in range(i - 1, max(-1, i - 5), -1):
             if records[j].line_type == LineType.comment and records[j].stripped.strip().startswith("##"):
@@ -1115,21 +1166,12 @@ def run_lint(records: list[LineRecord], ctx: ParseContext, config: Config, file_
         ("W011", lambda: rule_w011_readcell_without_check(records, ctx)),
         ("W012", lambda: rule_w012_sendkey_without_status(records, ctx)),
         ("W013", lambda: rule_w013_empty_catch(records, ctx)),
-        ("W014", lambda: rule_w014_unbounded_concat(records, ctx)),
-        ("W015", lambda: rule_w015_excel_save_between_writes(records, ctx)),
-        ("W016", lambda: rule_w016_date_type_misuse(records, ctx)),
-        ("W017", lambda: rule_w017_duplicate_define(records, ctx)),
         ("W018", lambda: rule_w018_for_zero_times(records, ctx)),
         ("S001", lambda: rule_s001_indentation(records, ctx, indent_str)),
         ("S002", lambda: rule_s002_comment_space(records, ctx)),
         ("S003", lambda: rule_s003_trailing_whitespace(records, ctx)),
         ("C002", lambda: rule_c002_region_without_name(records, ctx)),
-        ("C003", lambda: rule_c003_large_block_without_region(records, ctx)),
         ("C004", lambda: rule_c004_checkpoint_before_start_transaction(records, ctx)),
-        ("C005", lambda: rule_c005_inconsistent_naming(records, ctx)),
-        ("C006", lambda: rule_c006_magic_number_in_for(records, ctx)),
-        ("C007", lambda: rule_c007_if_opposite_if(records, ctx)),
-        ("C008", lambda: rule_c008_region_dash_inconsistent(records, ctx)),
     ]
     for code, fn in rule_list:
         if not config.rule_enabled(code, file_path.name):
@@ -1153,7 +1195,7 @@ def run_lint(records: list[LineRecord], ctx: ParseContext, config: Config, file_
 # -----------------------------------------------------------------------------
 
 
-def format_file(records: list[LineRecord], config: Config) -> list[str]:
+def format_file(records: list[LineRecord], config: Config, preserve_tab_depth: bool = False) -> list[str]:
     indent_char = "\t" if config.indent == "tab" else " "
     indent_size = 1 if config.indent == "tab" else config.indent_size
     indent_str = indent_char * indent_size
@@ -1161,28 +1203,24 @@ def format_file(records: list[LineRecord], config: Config) -> list[str]:
     prev_blank = False
     for r in records:
         stripped = r.stripped
+        content = stripped.lstrip()
         if r.line_type == LineType.blank:
             if not prev_blank:
                 out.append("")
             prev_blank = True
             continue
         prev_blank = False
-        # Indentation is derived purely from control-flow depth; regions do not
-        # change depth but should respect the current scope's indentation.
-        line_indent = indent_str * r.depth
-        out.append(line_indent + stripped)
+        if preserve_tab_depth:
+            existing_indent = r.stripped[: len(r.stripped) - len(r.stripped.lstrip())]
+            out.append(existing_indent + content)
+        else:
+            # Canonical indentation is derived from control-flow depth.
+            line_indent = indent_str * r.depth
+            out.append(line_indent + content)
     result = "\n".join(out)
     if result and not result.endswith("\n"):
         result += "\n"
     return result.splitlines(keepends=True) if result else []
-
-
-# -----------------------------------------------------------------------------
-# Fix engine
-# -----------------------------------------------------------------------------
-
-SAFE_FIX_CODES = {"E002", "E006", "W008", "C001", "C004", "S001", "S002", "S003"}
-UNSAFE_FIX_CODES = {"E001", "E003", "W004", "W018", "C007"}
 
 
 def apply_fixes(lines: list[str], records: list[LineRecord], diagnostics: list[Diagnostic], config: Config, safe_only: bool) -> list[str]:
@@ -1193,9 +1231,6 @@ def apply_fixes(lines: list[str], records: list[LineRecord], diagnostics: list[D
     - Compute patch operations against the original line numbers.
     - Sort operations by (line, op_type) descending and apply to a working copy.
     """
-    # Normalize lines to always end with a newline to simplify replacements.
-    fixed_lines = [ln if ln.endswith("\n") else ln + "\n" for ln in lines]
-
     # Collect patch operations.
     ops: list[tuple[int, str, list[str], str]] = []  # (line_index, op_type, payload_lines, code)
 
@@ -1211,7 +1246,7 @@ def apply_fixes(lines: list[str], records: list[LineRecord], diagnostics: list[D
         # C001: insert header block before first non-header instruction.
         if d.code == "C001":
             payload = [ln.rstrip("\n") + "\n" for ln in d.fix_replacement]
-            ops.append((0, "insert_block_top", payload, d.code))
+            ops.append((max(0, d.line - 1), "insert_before", payload, d.code))
             continue
 
         # E006: might expand into two lines.
@@ -1238,7 +1273,10 @@ def apply_fixes(lines: list[str], records: list[LineRecord], diagnostics: list[D
             ops.append((line_idx, "replace_one", payload, d.code))
 
     if not ops:
-        return fixed_lines
+        return lines
+
+    # Normalize lines to always end with a newline to simplify replacements.
+    fixed_lines = [ln if ln.endswith("\n") else ln + "\n" for ln in lines]
 
     # Sort operations bottom-up so earlier indices are unaffected by later inserts.
     order = {"insert_block_top": 0, "insert_before": 1, "replace_two": 2, "replace_one": 3}
@@ -1304,7 +1342,6 @@ def output_json(diagnostics: list[Diagnostic]) -> None:
 
 
 def output_statistics(diagnostics: list[Diagnostic]) -> None:
-    from collections import Counter
     counts: Counter[str] = Counter()
     for d in diagnostics:
         counts[d.code] += 1
@@ -1336,11 +1373,13 @@ def main() -> int:
     check_parser.add_argument("--json", action="store_true", help="JSON output")
     check_parser.add_argument("--select", type=str, default="", help="Comma-separated rules to enable")
     check_parser.add_argument("--ignore", type=str, default="", help="Comma-separated rules to ignore")
+    check_parser.add_argument("--safe-tabs", action="store_true", help="Preserve existing tab depth and disable S001 fixes/reports")
 
     format_parser = sub.add_parser("format", help="Format files")
     format_parser.add_argument("files", nargs="+", help="Files or globs")
     format_parser.add_argument("--diff", action="store_true", help="Show diff only")
     format_parser.add_argument("--check", action="store_true", help="Exit 1 if would reformat")
+    format_parser.add_argument("--safe-tabs", action="store_true", help="Preserve existing tab depth (avoid parser-depth reindent)")
 
     args = parser.parse_args()
     config = Config.load(args.config)
@@ -1365,6 +1404,8 @@ def main() -> int:
                 lines = [""]
             records, ctx = parse_file([line.rstrip("\r\n") for line in lines], path)
             diags = run_lint(records, ctx, config, path, indent_str)
+            if getattr(args, "safe_tabs", False):
+                diags = [d for d in diags if d.code != "S001"]
             all_diagnostics.extend(diags)
             if (args.fix or args.unsafe_fixes) and diags:
                 safe_only = not args.unsafe_fixes
@@ -1392,7 +1433,7 @@ def main() -> int:
             if not lines:
                 lines = [""]
             records, _ = parse_file([line.rstrip("\r\n") for line in lines], path)
-            formatted = format_file(records, config)
+            formatted = format_file(records, config, preserve_tab_depth=getattr(args, "safe_tabs", False))
             new_text = "".join(formatted) if formatted else ""
             orig_text = "".join(lines)
             if new_text != orig_text:
