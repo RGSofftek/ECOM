@@ -106,6 +106,10 @@ At the top of the script, document all global variables so the user knows which 
 ## ─────────────────────────────────────────────────────────────────────────────
 ```
 
+**Loops and variables:**
+
+Any variable that is written inside a loop (or by a RunScript invoked inside the loop) and read later in the same iteration or after the loop must be **initialized at the start of each iteration**. When variables are used as "partners" (e.g. `lastSAPError` and `stepWithError` — one set by a sub-script, both read when building errorDetail), they must be reset together at the beginning of the iteration so that stale values from a previous row or from an earlier step do not leak into the current row's outcome. This avoids misattribution of errors to the wrong step or row.
+
 ## Comparisons
 
 **Boolean outputs are strings** - most functions like `ElementExists` return `"true"` or `"false"` as strings.

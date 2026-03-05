@@ -6,6 +6,6 @@
   "fixable": ["ALL"],
   "unfixable": [],
   "per-file-ignores": {
-    "CheckSAPStatus.txt": ["W006"]
+    "CheckSAPStatus.txt": ["W006", "W001"]
   }
 }

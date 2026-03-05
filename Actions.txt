@@ -305,10 +305,15 @@ foreach rowNum in RowsToProcess {
 		AddValueToList "mandatoryChecks" value "Plant,<<<plant>>>"
 		AddValueToList "mandatoryChecks" value "Material,<<<material>>>"
 		AddValueToList "mandatoryChecks" value "BP,<<<bp>>>"
+		AddValueToList "mandatoryChecks" value "Cover Month,<<<coverMonth>>>"
 		DefineVariable as "missingFields" with the value ""
 		foreach check in mandatoryChecks {
 			ApplyRegex ".+?(?=,)" to the string "<<<check>>>" and save as "fieldName"
-			ApplyRegex "(?<=,).*$" to the string "<<<check>>>" and save as "fieldValue"
+			try
+				ApplyRegex "(?<=,).*$" to the string "<<<check>>>" and save as "fieldValue"
+			catch
+				DefineVariable as "fieldValue" with the value ""
+			end
 			if ("<<<fieldValue>>>" -eq "")
 				DefineVariable as "missingFields" with the value "<<<missingFields>>> <<<fieldName>>>,"
 			end
@@ -318,11 +323,18 @@ foreach rowNum in RowsToProcess {
 			DefineVariable as "errorDetail" with the value "Missing mandatory fields: <<<missingFields>>>"
 		end
 		if ("<<<rowOutcome>>>" -eq "pending")
+			if (("<<<contractType>>>" -notlike "P*") -AND ("<<<contractType>>>" -ne "YP01"))
+				DefineVariable as "rowOutcome" with the value "exception_fail"
+				DefineVariable as "errorDetail" with the value "Contract type not supported (Sell)"
+			end
+		end
+		if ("<<<rowOutcome>>>" -eq "pending")
 			#%endregion
 
 			#%region CREATE CONTRACT IN SAP ───────────────────────────────────────────
 			DefineVariable as "currentStep" with the value "Init"
 			DefineVariable as "lastSAPError" with the value ""
+			DefineVariable as "stepWithError" with the value ""
 
 			try
 				## Reset to transaction for each record so navigation is consistent
@@ -337,7 +349,6 @@ foreach rowNum in RowsToProcess {
 					SAP SelectComboBox id wnd[0]/usr/cmbP_LSCTP1 P
 				else
 					SAP SelectComboBox id wnd[0]/usr/cmbP_LSCTP1 S
-					Finish
 				end
 
 				SAP WriteText ElementId wnd[0]/usr/ctxtP_ORG1 Text "<<<orgData>>>"
@@ -654,7 +665,7 @@ foreach rowNum in RowsToProcess {
 					end
 					if ("<<<rulesHadError>>>" -eq "true")
 						DefineVariable as "rowOutcome" with the value "rules_fail"
-						DefineVariable as "errorDetail" with the value "<<<lastSAPError>>>"
+						DefineVariable as "errorDetail" with the value "<<<stepWithError>>>: <<<lastSAPError>>>"
 					else
 						DefineVariable as "rowOutcome" with the value "success"
 					end
@@ -685,6 +696,7 @@ foreach rowNum in RowsToProcess {
 		#%region SINGLE OUTCOME HANDLER ───────────────────────────────────────────
 		if ("<<<rowOutcome>>>" -eq "success")
 			Excel Write "Success" in WSName row <<<rowNum>>> and column <<<statusCol>>>
+			Excel Write "" in WSName row <<<rowNum>>> and column <<<detailsCol>>>
 			successCount++
 			DefineVariable as "successRowNums" with the value "<<<successRowNums>>> <<<rowNum>>>,"
 			GetCurrentDate format={"MM/dd/yyyy HH:mm:ss" en} and save as NowHuman
@@ -699,8 +711,7 @@ foreach rowNum in RowsToProcess {
 				DefineVariable as "rowCategory" with the value "SAP ERROR"
 			end
 			DefineVariable as "htmlFailRows" with the value "<<<htmlFailRows>>><tr><td>Row <<<rowNum>>></td><td><<<rowCategory>>></td><td><<<errorDetail>>></td></tr>"
-			File NewFolder in "<<<runEvidenceDir>>>" with the name "Row_<<<rowNum>>>"
-			Titanium CaptureImage and save as <<<runEvidenceDir>>>\Row_<<<rowNum>>>\SAP_Fail_Row<<<rowNum>>>.png
+			Titanium CaptureImage and save as <<<runEvidenceDir>>>\SAP_Fail_Row<<<rowNum>>>.png
 			Excel Write "Failed" in WSName row <<<rowNum>>> and column <<<statusCol>>>
 			Excel Write "<<<errorDetail>>>" in WSName row <<<rowNum>>> and column <<<detailsCol>>>
 			failCount++
@@ -724,8 +735,9 @@ foreach rowNum in RowsToProcess {
 #%region CLEANUP ─────────────────────────────────────────────────────────────
 ## Send summary email
 if (<<<failCount>>> -gt 0)
-	DefineVariable as "htmlBody" with the value "<html><body><h2>SAP Bot - <<<runId>>></h2><p><<<successCount>>> succeeded | <<<failCount>>> failed</p><h3>Failures</h3><table border='1' cellpadding='5' style='border-collapse:collapse'><tr><th>Row</th><th>Category</th><th>Error Detail</th></tr><<<htmlFailRows>>></table><h3>Succeeded Rows</h3><p><<<successRowNums>>></p></body></html>"
-	SendMail with subject "SAP Bot <<<runId>>> - Completed with failures" to "<<<notifyEmail>>>" with htmlbody "<<<htmlBody>>>"
+	Compress this folder path "<<<runEvidenceDir>>>" to this zipPath "<<<evidenceDir>>>\<<<runId>>>.zip" and save as evidenceZipPath
+	DefineVariable as "htmlBody" with the value "<html><body><h2>SAP Bot - <<<runId>>></h2><p><<<successCount>>> succeeded | <<<failCount>>> failed</p><p>Evidence: <<<runEvidenceDir>>> (ZIP: <<<evidenceZipPath>>>)</p><h3>Failures</h3><table border='1' cellpadding='5' style='border-collapse:collapse'><tr><th>Row</th><th>Category</th><th>Error Detail</th></tr><<<htmlFailRows>>></table><h3>Succeeded Rows</h3><p><<<successRowNums>>></p></body></html>"
+	SendMail with subject "SAP Bot <<<runId>>> - Completed with failures" to "<<<notifyEmail>>>" with htmlbody "<<<htmlBody>>>" and a file attachment "<<<evidenceZipPath>>>"
 else
 	DefineVariable as "htmlBody" with the value "<html><body><h2>SAP Bot - <<<runId>>></h2><p>All <<<successCount>>> contracts created successfully.</p><h3>Succeeded Rows</h3><p><<<successRowNums>>></p></body></html>"
 	SendMail with subject "SAP Bot <<<runId>>> - All contracts created" to "<<<notifyEmail>>>" with htmlbody "<<<htmlBody>>>"
