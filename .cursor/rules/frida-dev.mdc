@@ -1,0 +1,32 @@
+---
+description: FRIDA dev workflow in Cursor - lint after edits, RunScript scope, docs lookup, tooling cwd
+alwaysApply: true
+---
+
+# FRIDA development workflow (Cursor)
+
+## Lint after edits
+
+After any agent or **plan execution** (i.e. after the user approved and the agent applied changes, not after merely presenting a plan) that **modified one or more FRIDA scripts (`.txt`)**:
+
+- Run the **frida-lint-fix** command (as defined in `.cursor/commands/frida-lint-fix.md`).
+- **Target**: Use the modified FRIDA file(s) as the target—e.g. the file that was edited, or a glob/list that covers all modified `.txt` files. If the task had an explicit target (e.g. "fix Actions.txt"), use that. If multiple files and no clear target, use the focused/active FRIDA file or `*.txt` in project root per the command's target rules.
+- Follow the command's full workflow: format → check → propose → wait for approval → apply approved fixes → repeat until lint clean or user opts out (max 10 iterations per the command).
+
+If the execution did **not** modify any `.txt` FRIDA script, do **not** run frida-lint-fix.
+
+## Include RunScript targets when linting
+
+When running frida-lint-fix for a script that contains `RunScript <Name>`, include `<Name>.txt` in the lint target (e.g. pass both the main file and the sub-script(s) to format/check, or run lint once with a glob that covers them). This keeps the whole call graph consistent and avoids "main clean, sub-script broken" situations.
+
+## Resolve FRIDA syntax from docs when editing
+
+When adding or changing FRIDA instructions in a script, resolve syntax and parameters from `.cursor/docs/readers-index.md` and the relevant `.cursor/docs/<reader>-reader.md` (and frida-core for structure). Do not guess instruction names or parameters.
+
+## Run FRIDA tooling from project root
+
+Run shared FRIDA tooling from the project root: `python .cursor/tools/frida_lint.py` (format/check). Project-local scripts (e.g. root `fix_templates.py`) stay at repo root. Paths and config (e.g. `.fridalintrc`) resolve from the current working directory (project root).
+
+## Update sub-scripts when the contract changes
+
+When refactoring or fixing a FRIDA script that uses `RunScript <Name>`, if the change affects variables or flow that the sub-script relies on, open and update the referenced sub-script(s) as part of the same task (and then run frida-lint-fix on the set of modified files).

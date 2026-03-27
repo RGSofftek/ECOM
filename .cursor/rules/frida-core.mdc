@@ -1,0 +1,246 @@
+---
+description: FRIDA/Turing core language rules - syntax, variables, comparisons, structure, antipatterns, agent workflow
+alwaysApply: true
+---
+
+# FRIDA Core Language Rules
+
+## Agent Workflow
+
+When writing FRIDA code, follow this scoped retrieval workflow:
+
+1. **Apply rules first**: Always apply this core rule, then only the reader-specific rule(s) matching the request (e.g., `frida-sap.mdc` for SAP tasks).
+2. **Route through docs index**: Start function lookup from `.cursor/docs/readers-index.md` to identify which reader doc(s) to load.
+3. **Load only target reader docs**: Read only the relevant `.cursor/docs/<reader>-reader.md` file(s) for syntax and parameters.
+4. **Use syntax cheatsheet sparingly**: Consult `.cursor/docs/syntax-cheatsheet.md` only for shared syntax (variables, control flow, operators).
+5. **Docs first, readers.json second**: Prefer `.cursor/docs/` as the primary function reference. Use `readers.json` only when docs are ambiguous, incomplete, or conflicting.
+
+**Responsibilities:**
+- **Rules** (`*.mdc`) = mandates, anti-patterns, ambiguity control
+- **Docs** (`.cursor/docs/`) = function syntax, parameters, examples
+
+Do not load full `readers.json` or all reader docs for a single-reader task.
+
+## Syntax & Structure
+
+**All instructions must be single-line** - no reader instruction should break across lines.
+
+Only control flow blocks span multiple lines:
+
+```
+for N times { ... }
+foreach item in list { ... }
+while (condition) { ... }
+if (condition) ... end
+switch (expression) { case "val": ... end }
+try ... catch ... end
+```
+
+**Block closings:**
+- `if`/`else` blocks end with `end`
+- `try`/`catch` blocks end with `end`
+- `for`, `foreach`, `while` blocks end with `}`
+- `switch` blocks end with `}`, each `case` and `default` ends with `end`
+
+**Code organization:**
+- Use `#%region NAME` / `#%endregion` to separate logical phases (names are flexible)
+- Comments: `##` normal, `#*` important, `#?` warning, `#!` error
+
+### Checkpoint comments for debuggability
+
+- Before any major phase, SAP transaction, loop, or branching decision, add a checkpoint comment describing what is about to happen, for example:
+  - `## Header Details (Dates/Terms)`
+  - `## Apply provided characteristics to SAP table where names match.`
+- Use `#%region NAME` / `#%endregion` to bracket larger phases so they appear as clear sections in the execution log.
+- Remember that FRIDA echoes all comments and region markers into the log, e.g.:
+  - `3/3/2026 12:00:21 PM - ## Origin/Destination (write as provided; if Origin is empty, SAP may accept or validate) : Running`
+  - `3/3/2026 12:00:22 PM - #%region FAILURE HANDLING ──────────────────────────────────────────── : Running`
+- When designing scripts, think of these comments and regions as **checkpoints**: they should make both the script and the execution log easier to navigate when debugging.
+
+### Indentation
+
+Indent the body of every control flow block by one tab relative to its parent: `if`/`else` body one tab deeper than the `if`, `try`/`catch` body one tab deeper than the `try`, loop body one tab deeper than `for`/`foreach`/`while`. Add closing comments on `end` statements for deeply nested blocks (3+ levels), e.g. `## end if rowOutcome == pending`. Missing indentation has masked critical bugs (e.g. an outcome handler trapped inside a conditional so validation failures were never logged).
+
+## Variables
+
+**Global vs Local:**
+- Global (UI Variables panel): `<<Var>>`
+- Local (runtime): `<<<var>>>`
+
+**Declaration:**
+
+```
+## Preferred
+DefineVariable as "name" with the value "value"
+
+## Lists - must declare before use
+DefineVariable type "List" as "MyList"
+
+## Only use type "Date" for actual dates
+DefineVariable type "Date" as "myDate" with the value "2024-01-15"
+```
+
+**Variable interpolation syntax:** Use `<<<var>>>` (runtime), `<<Var>>` (global), or `{var}` (alternative reference). Whether quotes are required depends on the instruction: quotes **are required** inside comparison operators (e.g. `if ("<<<var>>>" -eq "value")`) and for `Text` parameters (e.g. `SAP WriteText ... Text "<<<value>>>"`). Many `save as` and path parameters accept bare interpolation per the instruction's documented syntax - consult the specific reader doc when in doubt.
+
+**List indexing:**
+
+```
+<<<MyList[<<<Index>>>]>>>
+<<<MyList[0]>>>
+<<<MyList[-1]>>>
+```
+
+**Global Variables - UI Definition and "NA" Convention:**
+
+Since all globals (`<<Var>>`) must be defined in Frida's UI Variables panel before use, if a global is undefined its placeholder appears literally (e.g. `<<VarName>>` in logs), and empty-check logic fails. For optional/empty values, `NA` is treated as "empty"; comparisons must use e.g. `if ("<<<singleRow>>>" -ne "NA")`.
+
+At the top of the script, document all global variables so the user knows which ones to define in the UI:
+
+```
+## ─────────────────────────────────────────────────────────────────────────────
+## GLOBAL VARIABLES (define in Frida UI before execution)
+## ─────────────────────────────────────────────────────────────────────────────
+## <<sapUser>>           - SAP username
+## <<sapPass>>           - SAP password
+## <<SingleRowOverride>> - (optional) Process only this row number; enter NA to process all
+## ─────────────────────────────────────────────────────────────────────────────
+```
+
+**Loops and variables:**
+
+Any variable that is written inside a loop (or by a RunScript invoked inside the loop) and read later in the same iteration or after the loop must be **initialized at the start of each iteration**. When variables are used as "partners" (e.g. `lastSAPError` and `stepWithError` — one set by a sub-script, both read when building errorDetail), they must be reset together at the beginning of the iteration so that stale values from a previous row or from an earlier step do not leak into the current row's outcome. This avoids misattribution of errors to the wrong step or row.
+
+## Comparisons
+
+**Boolean outputs are strings** - most functions like `ElementExists` return `"true"` or `"false"` as strings.
+
+```
+## Correct - string comparison
+if ("<<<exists>>>" -eq "true")
+    ## do something
+end
+
+## Wrong - treats as boolean
+if (<<<exists>>>)
+    ## will fail
+end
+```
+
+**Operators:** Use `-eq`, `-ne`, `-gt`, `-lt`, `-ge`, `-le`
+
+**While limitations:** Cannot use `-AND`/`-OR`/`-NOT`/`-XOR` in `while` conditions. Keep conditions simple; use `if` + `break` inside the loop for complex logic.
+
+```
+## Correct
+while ("<<<keepGoing>>>" -eq "true") {
+    if ("<<<condition1>>>" -eq "true")
+        if ("<<<condition2>>>" -eq "false")
+            break
+        end
+    end
+}
+
+## Wrong - compound logic in while
+while ("<<<a>>>" -eq "true" -AND "<<<b>>>" -eq "false") {
+    ## will fail
+}
+```
+
+**Loop control - FRIDA only has `break`, NOT `continue`:**
+
+- `break` exits the loop entirely - this works
+- `continue` (skip to next iteration) **DOES NOT EXIST** in FRIDA
+
+To skip an iteration, use a flag variable and wrap the remaining loop body:
+
+```
+## Wrong - continue doesn't exist
+foreach item in myList {
+    if ("<<<shouldSkip>>>" -eq "true")
+        continue
+    end
+    ## rest of processing
+}
+
+## Correct - use flag + conditional wrapper
+foreach item in myList {
+    DefineVariable as "shouldProcess" with the value "true"
+    if ("<<<shouldSkip>>>" -eq "true")
+        DefineVariable as "shouldProcess" with the value "false"
+    end
+    if ("<<<shouldProcess>>>" -eq "true")
+        ## rest of processing
+    end
+}
+```
+
+## RunScript as Reusable Functions
+
+FRIDA has no subroutines, but `RunScript <Script>.txt` runs a script file within the same process, sharing all variables bidirectionally. Use this to eliminate repeated instruction blocks:
+
+- Create a `.txt` file in the same process with the reusable logic.
+- Call it from the main script with `RunScript <Script>` or `RunScript <Script>.txt`.
+- The sub-script reads and writes the same variables as the caller.
+
+```
+## Sub-script (e.g. CheckSAPStatus.txt): reads status bar, updates lastSAPError if non-success
+SAP GetStatusInfo as StatInfo
+DefineVariable as "sapStatusType" with the value "<<<StatInfo[2]>>>"
+if ("<<<sapStatusType>>>" -ne "")
+    if ("<<<sapStatusType>>>" -ne "S")
+        DefineVariable as "lastSAPError" with the value "SAP(<<<StatInfo[2]>>>): <<<StatInfo[0]>>>"
+    end
+end
+
+## Main script - call site
+SAP SendKey 0
+RunScript CheckSAPStatus
+```
+
+Prefer `RunScript` over inline duplication when the same block appears **3+ times**.
+
+## List-Based Validation / Detection
+
+When checking multiple variables for the same condition (empty, non-empty, matching), prefer building a list and iterating over it instead of N separate `if` blocks:
+
+```
+DefineVariable type "List" as "checks"
+AddValueToList "checks" value "FieldName,<<<fieldValue>>>"
+## ... add more pairs ...
+DefineVariable as "result" with the value ""
+foreach item in checks {
+    ApplyRegex ".+?(?=,)" to the string "<<<item>>>" and save as "name"
+    ApplyRegex "(?<=,).*$" to the string "<<<item>>>" and save as "val"
+    if ("<<<val>>>" -eq "")
+        DefineVariable as "result" with the value "<<<result>>> <<<name>>>,"
+    end
+}
+```
+
+Use cases: mandatory-field validation, "has any rule" detection, and similar multi-field checks. Adding a new field is one `AddValueToList` line.
+
+## CountItems preconditions
+
+- `CountItems` throws `Variable is null` when the target variable is null (per `.cursor/docs/mix-reader.md`: "If variable is null it will return an error").
+- Before calling `CountItems in <varName> and save_as <varName2>`, always guarantee that `<varName>` has been **defined and populated**, not just declared.
+- For list accumulators that may legitimately end up empty (e.g. optional texts, dynamic filters), guard `CountItems` with a separate boolean flag (e.g. `hasItems`) or with a prior check that at least one contributing input is non-empty, and **skip the `CountItems` call entirely** if the flag is false.
+
+## SendMail
+
+**Avoid special characters** in subject/body that may break the lexer - use hyphen `-` instead of en dash `–`. See `.cursor/docs/mix-reader.md` for full syntax.
+
+## System Notifications / `systemnotify`
+
+- `systemnotify` must **only** be used when explicitly requested by the user for the current script or task.
+- `systemnotify` triggers an OS/emergent confirmation window and **must not** be treated as a general-purpose logging or status mechanism.
+- Treat `systemnotify` as an **exceptional, user-driven action**, not a default way to surface information.
+
+## Antipatterns
+
+- **Never break instructions across lines** (applies to all readers)
+- **Never treat `"true"`/`"false"` as real booleans** - always string compare
+- **No indirect variable dereferencing** (variable name stored in another variable) unless confirmed
+- **Avoid nested quotes in selectors** that cause lexical errors
+- **Do not introduce `systemnotify`** unless the user has explicitly requested its use for this automation
+- **Never call `Finish` without notifying first** - `Finish` terminates immediately and skips all subsequent code including CLEANUP regions. Send any notification (email, Excel save) before calling `Finish`. Wrong: `catch as ex` then `Finish "..."` only. Correct: build and send notification (e.g. `SendMail`), then `Excel Save WB and close`, then `Finish "..."`.
+- **Naive decimal replacement** - When converting between number formats (e.g. US `1,234.56` to SAP `1234,56`), always strip thousands separators first, then replace the decimal separator. Wrong: `ReplaceFromVariable {var} this {.} for {,}` only (turns `1,234.56` into `1,234,56`). Correct: `ReplaceFromVariable {var} this {,} for {}` then `ReplaceFromVariable {var} this {.} for {,}`.

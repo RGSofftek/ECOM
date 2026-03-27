@@ -1,0 +1,79 @@
+---
+description: FRIDA Excel reader rules - workbook lifecycle, checkpoints, resume strategy
+alwaysApply: false
+---
+
+# FRIDA Excel Reader Rules
+
+## Workbook Lifecycle
+
+`Excel NewWB` creates an in-memory workbook - it is NOT saved until you explicitly call `Save` or `SaveAs`.
+
+```
+Excel NewWB as WB
+Excel NewWSheet WB as WS
+## ... work with workbook ...
+Excel SaveAs WB path "C:\output\report.xlsx"
+Excel Close WB
+```
+
+## Checkpointing
+
+For long processes, save after each processed item to enable recovery:
+
+```
+foreach item in itemList {
+    ## Process item
+    try
+        ## ... business logic ...
+        Excel Append from WSProcessed at [1 ="<<<itemId>>>", 2 ="SUCCESS", 3 ="<<<timestamp>>>"]
+    catch as ex
+        Excel Append from WSProcessed at [1 ="<<<itemId>>>", 2 ="FAIL", 3 ="<<<ex>>>"]
+    end
+    Excel Save WB
+}
+```
+
+## Always Close Workbooks
+
+```
+## Save and close
+Excel Save WB and close
+
+## Or separately
+Excel Save WB
+Excel Close WB
+```
+
+## Header Validation
+
+When scripts depend on specific columns, validate headers before processing:
+
+```
+Excel ReadCellText from the worksheet {WS} from the cell {1,1} and save its value as {header1}
+if ("<<<header1>>>" -ne "Expected Header")
+    Finish "Template mismatch: expected 'Expected Header' in A1"
+end
+```
+
+## ReadCellText as Standard
+
+Use `ReadCellText` as the default for reading cell values. `ReadCell` returns the raw value (e.g. Excel serial number for dates); `ReadCellText` returns the display-formatted text (e.g. `03/15/2026`), preserving the number format. Always use `ReadCellText`; if `ReadCell` is used, add a `#?` comment justifying why. Syntax: `ReadCellText` requires braces around the worksheet key, e.g. `Excel ReadCellText from the worksheet {WSName} from the cell {row,col} and save its value as {varName}`.
+
+## Resume Strategy
+
+Maintain a Processed log sheet to enable resuming interrupted runs:
+
+```
+#%region RESUME_LOGIC
+Excel LoadWBook "<<<filePath>>>" as WB
+Excel LoadWSheet WB sheet "Processed" as WSProcessed
+
+## Count already processed items
+Excel ReadColumn from the worksheet {WSProcessed} with the column index {1} start_at {2} and save its value as {processed} visible without nulls
+CountItems in processed and save_as totalProcessed
+
+## Calculate starting row in Template sheet
+MathOperation <<<totalProcessed>>> + 2 and save as startRow
+#%endregion
+```

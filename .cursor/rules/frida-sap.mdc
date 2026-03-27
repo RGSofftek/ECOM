@@ -1,0 +1,177 @@
+---
+description: FRIDA SAP reader rules - retry patterns, data validation, continue-on-error policy, systemic vs row-level errors
+alwaysApply: false
+---
+
+# FRIDA SAP Reader Rules
+
+
+## Validate Data Before SAP Writes
+
+If values from Excel can be invalid, validate before writing to SAP:
+
+```
+## Validate required field
+if ("<<<fieldValue>>>" -eq "")
+    Excel Append from WSProcessed at [1 ="<<<rowNum>>>", 2 ="FAIL", 3 ="Empty required field"]
+    Excel Save WB
+    ## Skip to next item - don't write to SAP
+end
+
+## Validate format
+ApplyRegex "^\d{10}$" to the string "<<<documentNumber>>>" and save as "isValid"
+if ("<<<isValid>>>" -eq "")
+    Excel Append from WSProcessed at [1 ="<<<rowNum>>>", 2 ="FAIL", 3 ="Invalid document number format"]
+    Excel Save WB
+end
+```
+
+## Continue-on-Error Policy
+
+For batch processing, log failures and continue to the next row:
+
+```
+foreach item in itemList {
+    try
+        SAP StartTransaction VA01
+        ## ... SAP operations ...
+        Excel Append from WSProcessed at [1 ="<<<itemId>>>", 2 ="SUCCESS", 3 ="<<<timestamp>>>"]
+    catch as ex
+        ## Log failure but continue
+        Excel Append from WSProcessed at [1 ="<<<itemId>>>", 2 ="FAIL", 3 ="<<<ex>>>"]
+        ## Optional: capture evidence
+        Titanium CaptureImage and save in "<<<evidencePath>>>\<<<itemId>>>_error.png"
+    end
+    Excel Save WB
+}
+```
+
+## When to Use Finish
+
+Only use `Finish` for systemic errors that affect the entire run:
+
+```
+## Systemic error - stop everything
+try
+    SAP RunSapInstance "PRD" 100 <<sapUser>> <<sapPassword>> EN graphic
+catch as ex
+    Finish "SAP login failed - cannot continue: <<<ex>>>"
+end
+
+## Row-level error - log and continue (don't Finish)
+try
+    SAP WriteText ElementId wnd[0]/usr/txtField Text "<<<value>>>"
+catch as ex
+    ## Log but don't Finish
+    Excel Append from WSProcessed at [1 ="<<<rowNum>>>", 2 ="FAIL", 3 ="<<<ex>>>"]
+end
+```
+
+## SAP Deferred Validation
+
+SAP accepts input into fields without immediate validation. Errors only surface when you trigger an action:
+- `SendKey 0` (Enter)
+- Button clicks
+- Screen transitions
+
+This means multiple fields can be wrong, but you won't know until the validation trigger.
+
+SAP status errors (E/A/X) after `SendKey 0` are **not always fatal**. The pattern is to capture the message for diagnostics. If the error is truly blocking, a subsequent SAP instruction will fail and fall into the `catch` block, where `lastSAPError` provides the root cause. FRIDA has no `Throw` instruction; do not use it.
+
+### Pattern: Status Bar Check After Validation
+
+Use `SAP GetStatusInfo as StatInfo` (not `ReadStatus`). It returns a structured array: `StatInfo[0]` = message, `StatInfo[1]` = id, `StatInfo[2]` = type (E/A/X/S/I/W). Capture non-success into `lastSAPError`; do not terminate - let the outer try/catch handle real failures.
+
+```
+SAP WriteText ElementId wnd[0]/usr/ctxtField1 Text "<<<value1>>>"
+SAP WriteText ElementId wnd[0]/usr/ctxtField2 Text "<<<value2>>>"
+SAP SendKey 0
+SAP GetStatusInfo as StatInfo
+DefineVariable as "sapStatusMsg" with the value "<<<StatInfo[0]>>>"
+DefineVariable as "sapStatusId" with the value "<<<StatInfo[1]>>>"
+DefineVariable as "sapStatusType" with the value "<<<StatInfo[2]>>>"
+if ("<<<sapStatusType>>>" -ne "")
+    if ("<<<sapStatusType>>>" -ne "S")
+        DefineVariable as "lastSAPError" with the value "SAP(<<<sapStatusType>>>) [<<<sapStatusId>>>]: <<<sapStatusMsg>>>"
+    end
+end
+```
+
+When this pattern is needed **3+ times** in a script, extract it into a sub-script and call via `RunScript`. See `frida-core.mdc` "RunScript as Reusable Functions".
+
+### Pattern: Step Tracking for Diagnostics
+
+Track which step failed so error logs are actionable. Use `lastSAPError` and `currentStep`; in the catch block, prefer `lastSAPError` as the root cause when present.
+
+```
+DefineVariable as "currentStep" with the value ""
+DefineVariable as "lastSAPError" with the value ""
+
+try
+    DefineVariable as "currentStep" with the value "Entry Screen"
+    SAP WriteText ElementId wnd[0]/usr/ctxtP_ORG1 Text "<<<orgData>>>"
+    SAP SendKey 0
+    SAP GetStatusInfo as StatInfo
+    DefineVariable as "sapStatusType" with the value "<<<StatInfo[2]>>>"
+    if ("<<<sapStatusType>>>" -ne "")
+        if ("<<<sapStatusType>>>" -ne "S")
+            DefineVariable as "lastSAPError" with the value "SAP(<<<StatInfo[2]>>>): <<<StatInfo[0]>>>"
+        end
+    end
+
+    DefineVariable as "currentStep" with the value "Header Details"
+    SAP WriteText ElementId wnd[0]/usr/ctxtField Text "<<<material>>>"
+    SAP SendKey 0
+    SAP GetStatusInfo as StatInfo
+    DefineVariable as "sapStatusType" with the value "<<<StatInfo[2]>>>"
+    if ("<<<sapStatusType>>>" -ne "")
+        if ("<<<sapStatusType>>>" -ne "S")
+            DefineVariable as "lastSAPError" with the value "SAP(<<<StatInfo[2]>>>): <<<StatInfo[0]>>>"
+        end
+    end
+
+catch as ex
+    if ("<<<lastSAPError>>>" -ne "")
+        Excel Append from WSProcessed at [1 ="<<<rowNum>>>", 2 ="FAIL", 3 ="<<<currentStep>>>: <<<lastSAPError>>>"]
+    else
+        Excel Append from WSProcessed at [1 ="<<<rowNum>>>", 2 ="FAIL", 3 ="<<<currentStep>>>: <<<ex>>>"]
+    end
+end
+```
+
+## Transaction Recovery
+
+When a row fails mid-transaction, and execution is being made on a series of elements (loop or list) reset SAP state before the next element.
+
+**Important:** Use `SAP CloseTrans`, which is the dedicated function for closing/cancelling the current transaction.
+
+```
+catch as ex
+    Titanium CaptureImage and save as <<<evidenceDir>>>\error_<<<rowNum>>>.png
+    Excel Append from WSProcessed at [1 ="<<<rowNum>>>", 2 ="FAIL", 3 ="<<<currentStep>>>: <<<ex>>>"]
+    Excel Save WB
+
+    ## Reset transaction state - use CloseTrans, NOT SendKey
+    try
+        SAP CloseTrans
+    catch
+        ## Ignore - StartTransaction will reset anyway
+    end
+end
+```
+
+For reliable state reset, prefer restarting the transaction at each loop iteration:
+
+```
+for <<<count>>> times {
+    SAP StartTransaction ZWB21
+    ## Fresh state guaranteed
+}
+```
+
+## Pre-Validation vs Post-Validation
+
+- **Pre-validation** (before `WriteText`): Catches obvious issues - empty required fields, wrong formats
+- **Post-validation** (after `SendKey`/button): Catches SAP-specific errors - invalid codes, business rule violations, missing master data
+
+Use both strategies together for robust error handling.
