@@ -131,6 +131,8 @@ for <<<ExpectedHeaderCount>>> times {
 
 if ("<<<HeadersOk>>>" -ne "true")
 	Message "TEMPLATE HEADER VALIDATION FAILED: <<<HeaderError>>>"
+	DefineVariable as "htmlBody" with the value "<html><body><h2>SAP Bot - <<<runId>>></h2><p>Template header validation failed.</p><p><<<HeaderError>>></p><p>Template file: <<excelFile>></p></body></html>"
+	SendMail with subject "SAP Bot <<<runId>>> - Template header validation failed" to "<<<notifyEmail>>>" with htmlbody "<<<htmlBody>>>"
 	Excel Save WBName and close
 	Finish
 else
